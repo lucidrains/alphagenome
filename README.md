@@ -7,7 +7,7 @@ Implementation of [AlphaGenome](https://deepmind.google/discover/blog/alphagenom
 ## Install
 
 ```bash
-$ pip install alphagenome
+$ pip install alphagenome-pytorch
 ```
 
 ## Usage

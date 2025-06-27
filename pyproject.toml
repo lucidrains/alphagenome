@@ -1,6 +1,6 @@
 [project]
-name = "alphagenome"
-version = "0.0.3"
+name = "alphagenome-pytorch"
+version = "0.0.1"
 description = "AlphaGenome"
 authors = [
     { name = "Phil Wang", email = "lucidrains@gmail.com" }
@@ -32,7 +32,7 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://pypi.org/project/alphagenome/"
+Homepage = "https://pypi.org/project/alphagenome-pytorch/"
 Repository = "https://github.com/lucidrains/alphagenome"
 
 [project.optional-dependencies]
