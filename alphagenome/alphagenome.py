@@ -48,14 +48,14 @@ class NormWrapper(Module):
         dim,
         block: Module,
         dropout = 0.,
-        sandwich_norm = False
+        sandwich = False
     ):
         super().__init__()
         self.block = block
         self.pre_rmsnorm = nn.RMSNorm(dim) # they use an interesting variant of batchnorm, batch-rmsnorm. craft later and make sure it works distributed
 
         self.post_block_dropout = nn.Dropout(dropout)
-        self.post_rmsnorm = nn.RMSNorm(dim) if sandwich_norm else nn.Identity()
+        self.post_rmsnorm = nn.RMSNorm(dim) if sandwich else nn.Identity()
 
     def forward(
         self,
@@ -145,6 +145,32 @@ class Attention(Module):
         out = self.merge_heads(out)
         return self.to_out(out)
 
+# pairwise attention is a single headed attention across rows, they said columns did not help
+
+class PairwiseRowAttention(Module):
+    def __init__(
+        self,
+        dim
+    ):
+        super().__init__()
+        self.scale = dim ** -0.5
+
+        self.to_qk = LinearNoBias(dim, dim * 2)
+        self.to_v = Linear(dim, dim)
+
+    def forward(
+        self,
+        x
+    ):
+
+        q, k = self.to_qk(x).chunk(2, dim = -1)
+        v = self.to_v(x)
+
+        sim = einsum(q, k, 'b n i d, b n j d -> b n i j')
+        attn = sim.softmax(dim = -1)
+
+        return einsum(attn, v, 'b n i j, b n j d -> b n i d')
+
 # feedforward for both single and pairwise
 
 def FeedForward(
@@ -187,8 +213,8 @@ class Transformer(Module):
             ff = FeedForward(dim = dim, expansion_factor = ff_expansion_factor)
 
             layers.append(ModuleList([
-                SandwichNorm(dim = dim, block = attn, dropout = dropout),
-                SandwichNorm(dim = dim, block = ff, dropout = dropout),
+                NormWrapper(dim = dim, block = attn, dropout = dropout, sandwich = True),
+                NormWrapper(dim = dim, block = ff, dropout = dropout, sandwich = True),
             ]))
 
         self.layers = ModuleList(layers)
