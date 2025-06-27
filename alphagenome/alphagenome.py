@@ -184,7 +184,11 @@ class Attention(Module):
 
             sim = softclamp(sim + attn_bias, value = self.softclamp_value)
 
+        # attention
+
         attn = sim.softmax(dim = -1)
+
+        # aggregate
 
         out = einsum(attn, v, 'b h i j, b j d -> b h i d')
 
@@ -212,8 +216,15 @@ class PairwiseRowAttention(Module):
         q, k = self.to_qk(x).chunk(2, dim = -1)
         v = self.to_v(x)
 
+        # similarity
+
         sim = einsum(q, k, 'b n i d, b n j d -> b n i j')
+
+        # attention
+
         attn = sim.softmax(dim = -1)
+
+        # aggregate
 
         return einsum(attn, v, 'b n i j, b n j d -> b n i d')
 
