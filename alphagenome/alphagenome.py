@@ -107,9 +107,12 @@ class Attention(Module):
         heads = 8,
         dim_head_qk = 128,
         dim_head_v = 192,
+        dim_pairwise = None,
         softclamp_value = 5. # they employ attention softclamping
     ):
         super().__init__()
+        dim_pairwise = default(dim_pairwise, dim)
+
         self.scale = dim_head ** -0.5
 
         qkv_proj_dim_out = (dim_head_qk * heads, dim_head_qk, dim_head_v)
@@ -133,9 +136,9 @@ class Attention(Module):
         # to attention bias
 
         self.to_attn_bias = Sequential(
-            nn.RMSNorm(dim), # replace with BatchRMSNorm once crafted
+            nn.RMSNorm(dim_pairwise), # replace with BatchRMSNorm once crafted
             nn.GELU(),
-            LinearNoBias(dim, heads),
+            LinearNoBias(dim_pairwise, heads),
             Rearrange('b i j h -> b h i j')
         )
         # variables
@@ -146,7 +149,7 @@ class Attention(Module):
     def forward(
         self,
         x,
-        pairwise_feats = None, # Float['b i j dp']
+        pairwise = None, # Float['b i j dp']
         rotary_emb = None
     ):
 
@@ -171,10 +174,15 @@ class Attention(Module):
 
         # add attention bias + softclamping
 
-        if exists(pairwise_feats):
-            attn_bias = self.to_attn_bias(pairwise_feats)
+        if exists(pairwise):
+            attn_bias = self.to_attn_bias(pairwise)
 
-            sim = softclamp(sim + attn_bias, clamp_value = self.softclamp_value)
+            assert divisible_by(sim.shape[-1], attn_bias.shape[-1])
+            expand_factor = sim.shape[-1] // attn_bias.shape[-1]
+
+            attn_bias = repeat(attn_bias, 'b h i j -> b h (i r1) (j r2)', r1 = expand_factor, r2 = expand_factor)
+
+            sim = softclamp(sim + attn_bias, value = self.softclamp_value)
 
         attn = sim.softmax(dim = -1)
 
@@ -240,37 +248,77 @@ class Transformer(Module):
         dropout = 0.,
         ff_expansion_factor = 2.,
         max_positions = 8192,
+        dim_pairwise = None,
+        pairwise_every_num_single_blocks = 2, # how often to do a pairwise block
         attn_kwargs: dict = dict(),
         ff_kwargs: dict = dict()
     ):
         super().__init__()
+        dim_pairwise = default(dim_pairwise, dim)
+
         layers = []
+
+        self.pairwise_every = pairwise_every_num_single_blocks
 
         self.rotary_emb = RotaryEmbedding(dim_head_qk, max_positions = max_positions)
 
-        for _ in range(depth):
-            attn = Attention(dim = dim, dim_head_qk = dim_head_qk, dim_head_v = dim_head_v, heads = heads)
+        for layer_index in range(depth):
+
+            attn = Attention(dim = dim, dim_head_qk = dim_head_qk, dim_head_v = dim_head_v, heads = heads, dim_pairwise = dim_pairwise)
 
             ff = FeedForward(dim = dim, expansion_factor = ff_expansion_factor)
 
+            attn = NormWrapper(dim = dim, block = attn, dropout = dropout, sandwich = True)
+            ff = NormWrapper(dim = dim, block = ff, dropout = dropout, sandwich = True)
+
+            # maybe pairwise
+
+            pairwise_attn, pairwise_ff = None, None
+
+            if divisible_by(layer_index, self.pairwise_every):
+                pairwise_attn = PairwiseRowAttention(dim_pairwise)
+                pairwise_ff = FeedForward(dim = dim_pairwise, expansion_factor = ff_expansion_factor)
+
+                pairwise_attn = NormWrapper(dim = dim_pairwise, block = pairwise_attn)
+                pairwise_ff = NormWrapper(dim = dim_pairwise, block = pairwise_ff)
+
+            # add to layers
+
             layers.append(ModuleList([
-                NormWrapper(dim = dim, block = attn, dropout = dropout, sandwich = True),
-                NormWrapper(dim = dim, block = ff, dropout = dropout, sandwich = True),
+                attn,
+                ff,
+                pairwise_attn,
+                pairwise_ff
             ]))
+
 
         self.layers = ModuleList(layers)
 
-    def forward(self, x):
+    def forward(
+        self,
+        single,
+        pairwise = None
+    ):
 
-        seq_len = x.shape[1]
+        seq_len = single.shape[1]
 
         rotary_emb = self.rotary_emb(seq_len)
 
-        for attn, ff in self.layers:
-            x = attn(x, rotary_emb = rotary_emb)
-            x = ff(x)
+        for (
+            attn,
+            ff,
+            maybe_pairwise_attn,
+            maybe_pairwise_ff
+        ) in self.layers:
 
-        return x
+            single = attn(single, rotary_emb = rotary_emb, pairwise = pairwise)
+            single = ff(single)
+
+            if exists(maybe_pairwise_attn):
+                pairwise = maybe_pairwise_attn(pairwise)
+                pairwise = maybe_pairwise_ff(pairwise)
+
+        return single, pairwise
 
 # embedding
 
@@ -306,6 +354,7 @@ class AlphaGenome(Module):
         dim = 768,
         basepairs = 5,
         dna_embed_width = 15,
+        dim_pairwise = None,
         transformer_kwargs: dict = dict()
     ):
         super().__init__()
@@ -315,16 +364,18 @@ class AlphaGenome(Module):
 
         self.transformer = Transformer(
             dim = dim,
+            dim_pairwise = dim_pairwise,
             **transformer_kwargs
         )
 
     def forward(
         self,
-        seq
+        seq,
+        pairwise
     ):
 
         dna_embed = self.to_dna_embed(seq)
 
-        attended = self.transformer(dna_embed)
+        attended = self.transformer(dna_embed, pairwise)
 
         return attended
