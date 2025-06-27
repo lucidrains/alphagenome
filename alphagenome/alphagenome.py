@@ -31,6 +31,29 @@ def default(v, d):
 def softclamp(t, value = 5.):
     return (t / value).tanh() * value
 
+# sandwich norm
+
+class SandwichNorm(Module):
+    def __init__(
+        self,
+        dim,
+        block: Module,
+        dropout = 0.
+    ):
+        super().__init__()
+        self.block = block
+        self.pre_rmsnorm = nn.RMSNorm(dim) # they use an interesting variant of batchnorm, batch-rmsnorm. craft later and make sure it works distributed
+
+        self.post_block_dropout = nn.Dropout(dropout)
+        self.post_rmsnorm = nn.RMSNorm(dim)
+
+    def forward(self, x):
+        residual = x
+        x = self.pre_rmsnorm(x)
+        out = self.block(x)
+        out = self.post_block_dropout(out)
+        return self.post_rmsnorm(out) + residual
+
 # attention
 
 class Attention(Module):
@@ -110,6 +133,7 @@ def FeedForward(
 
     return Sequential(
         Linear(dim, dim_inner),
+        nn.ReLU(),
         nn.Dropout(dropout),
         Linear(dim_inner, dim)
     )
