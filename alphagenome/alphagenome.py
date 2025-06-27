@@ -40,21 +40,22 @@ def default(v, d):
 def softclamp(t, value = 5.):
     return (t / value).tanh() * value
 
-# sandwich norm
+# prenorm and sandwich norm - they use sandwich norm for single rep, prenorm for pairwise rep
 
-class SandwichNorm(Module):
+class NormWrapper(Module):
     def __init__(
         self,
         dim,
         block: Module,
-        dropout = 0.
+        dropout = 0.,
+        sandwich_norm = False
     ):
         super().__init__()
         self.block = block
         self.pre_rmsnorm = nn.RMSNorm(dim) # they use an interesting variant of batchnorm, batch-rmsnorm. craft later and make sure it works distributed
 
         self.post_block_dropout = nn.Dropout(dropout)
-        self.post_rmsnorm = nn.RMSNorm(dim)
+        self.post_rmsnorm = nn.RMSNorm(dim) if sandwich_norm else nn.Identity()
 
     def forward(
         self,
@@ -144,7 +145,7 @@ class Attention(Module):
         out = self.merge_heads(out)
         return self.to_out(out)
 
-# feedforward
+# feedforward for both single and pairwise
 
 def FeedForward(
     dim,
