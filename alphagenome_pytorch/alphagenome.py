@@ -213,8 +213,8 @@ class SingleToPairwise(Module):
         self.split_heads = Rearrange('b n (h d) -> b n h d', h = heads)
 
         self.to_outer_sum = Sequential(
+            nn.GELU(),
             LinearNoBias(dim, dim_pairwise * 2),
-            nn.GELU()
         )
 
         self.to_qk = LinearNoBias(dim, dim_inner * 2)
