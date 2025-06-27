@@ -4,7 +4,7 @@ from functools import partial
 import torch
 from torch import nn
 import torch.nn.functional as F
-from torch.nn import Linear, Module, ModuleList
+from torch.nn import Linear, Sequential, Module, ModuleList
 
 from einops.layers.torch import Rearrange
 from einops import rearrange, einsum
@@ -24,6 +24,15 @@ LinearNoBias = partial(Linear, bias = False)
 
 def exists(v):
     return v is not None
+
+def divisible_by(num, den):
+    return (num % den) == 0
+
+def is_odd(num):
+    return not divisible_by(num, 2)
+
+def is_even(num):
+    return divisible_by(num, 2)
 
 def default(v, d):
     return v if exists(v) else d
@@ -149,7 +158,7 @@ class Transformer(Module):
         self,
         dim,
         *,
-        depth,
+        depth = 8,
         heads = 8,
         dim_head_qk = 128,
         dim_head_v = 192,
@@ -181,16 +190,58 @@ class Transformer(Module):
 
         return x
 
+# embedding
+
+class DNAEmbed(Module):
+    def __init__(
+        self,
+        dim,
+        dim_input = 5, # 5 basepairs
+        width = 15
+    ):
+        super().__init__()
+        assert is_odd(width)
+        self.conv = nn.Conv1d(dim_input, dim, width, padding = width // 2)
+        self.pointwise = nn.Conv1d(dim, dim, 1)
+
+    def forward(
+        self,
+        seq # Int['b n']
+    ):
+        onehot = F.one_hot(seq, num_classes = 5).float()
+        x = rearrange(onehot, 'b n d -> b d n')
+
+        out = self.conv(x)
+        out = out + self.pointwise(out)
+        return rearrange(out, 'b d n -> b n d')
+
 # classes
 
 class AlphaGenome(Module):
     def __init__(
         self,
+        dim = 768,
+        basepairs = 5,
+        dna_embed_width = 15,
+        transformer_kwargs: dict = dict()
     ):
         super().__init__()
+        assert is_odd(dna_embed_width)
+
+        self.to_dna_embed = DNAEmbed(dim, dim_input = basepairs, width = dna_embed_width)
+
+        self.transformer = Transformer(
+            dim = dim,
+            **transformer_kwargs
+        )
 
     def forward(
         self,
         seq
     ):
-        return seq
+
+        dna_embed = self.to_dna_embed(seq)
+
+        attended = self.transformer(dna_embed)
+
+        return attended
