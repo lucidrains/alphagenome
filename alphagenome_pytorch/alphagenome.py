@@ -2,11 +2,11 @@ from __future__ import annotations
 from functools import partial
 
 import torch
-from torch import nn, cat, stack, arange
+from torch import nn, cat, stack, arange, logspace
 import torch.nn.functional as F
 from torch.nn import Linear, Sequential, Module, ModuleList
 
-import einx
+from einx import add, multiply, greater
 from einops.layers.torch import Rearrange, Reduce
 from einops import rearrange, repeat, einsum
 
@@ -15,6 +15,7 @@ from einops import rearrange, repeat, einsum
 # b - batch
 # h - heads
 # n - sequence
+# p - relative positions
 # d - feature dimension
 
 # constants
@@ -41,6 +42,12 @@ def default(v, d):
 def softclamp(t, value = 5.):
     return (t / value).tanh() * value
 
+def relative_shift(t):
+    *leading_dims, seq_len, dim = t.shape
+    t = F.pad(t, (1, 0), value = 0.)
+    t = t.reshape(*leading_dims, dim + 1, seq_len)
+    return t[..., 1:, :].reshape(*leading_dims, seq_len, dim)
+
 # rotary, but with attenuation of short relative distance frequencies
 
 class RotaryEmbedding(Module):
@@ -51,7 +58,7 @@ class RotaryEmbedding(Module):
     ):
         super().__init__()
         num_freqs = dim // 2
-        inv_freq = 1. / (arange(num_freqs).float() + torch.logspace(1, max_positions - num_freqs + 1, num_freqs))
+        inv_freq = 1. / (arange(num_freqs).float() + logspace(1, max_positions - num_freqs + 1, num_freqs))
         self.register_buffer('inv_freq', inv_freq)
 
     def forward(
@@ -69,6 +76,32 @@ def rotate_half(x):
 
 def apply_rotary_pos_emb(pos, t):
     return t * pos.cos() + rotate_half(t) * pos.sin()
+
+# 'central mask features' - relative positions for constituting pairwise rep
+
+class RelativePosFeatures(Module):
+    def __init__(self, pool_size = 16):
+        super().__init__()
+        self.pool_size = pool_size
+
+    def forward(self, single):
+
+        _, seq_len, dim = single.shape
+
+        seq_len //= self.pool_size
+        half_dim = dim // 2
+
+        rel_pos = arange(2 * seq_len - 1) - (seq_len - 1)
+
+        center_widths = (
+            arange(half_dim) +
+            logspace(1, seq_len - half_dim + 1, half_dim + 1)[:-1] # endpoint = False
+        )
+
+        abs_rel_pos, rel_pos_sign = rel_pos.abs(), rel_pos.sign()
+        embeds = greater('j, i -> i j', center_widths, abs_rel_pos).float()
+
+        return cat((embeds, multiply('i, i j', rel_pos_sign, embeds)), dim = -1)
 
 # prenorm and sandwich norm - they use sandwich norm for single rep, prenorm for pairwise rep
 
@@ -90,10 +123,11 @@ class NormWrapper(Module):
     def forward(
         self,
         x,
+        *args,
         **kwargs
     ):
         x = self.pre_rmsnorm(x)
-        out = self.block(x, **kwargs)
+        out = self.block(x, *args, **kwargs)
         out = self.post_block_dropout(out)
         return self.post_rmsnorm(out)
 
@@ -210,7 +244,7 @@ class SingleToPairwise(Module):
 
         dim_inner = heads * dim_pairwise
 
-        self.split_heads = Rearrange('b n (h d) -> b n h d', h = heads)
+        self.split_heads = Rearrange('... (h d) -> ... h d', h = heads)
 
         self.to_outer_sum = Sequential(
             nn.GELU(),
@@ -220,20 +254,46 @@ class SingleToPairwise(Module):
         self.to_qk = LinearNoBias(dim, dim_inner * 2)
         self.qk_to_pairwise = Linear(heads, dim_pairwise)
 
-    def forward(self, single):
+        # relative position related
+
+        self.to_rel_pos_encoding = Linear(dim, heads * dim_pairwise)
+        self.qk_rel_pos_bias = nn.Parameter(torch.zeros(2, 1, 1, heads, dim_pairwise))
+
+    def forward(
+        self,
+        single,
+        rel_pos_feats = None
+    ):
 
         single = self.avg_pool(single)
+
+        pool_seq_len = single.shape[1]
 
         q, k = self.to_qk(single).chunk(2, dim = -1)
         q, k = tuple(self.split_heads(t) for t in (q, k))
 
         sim = einsum(q, k, 'b i h d, b j h d -> b i j h')
 
+        if exists(rel_pos_feats):
+            rel_pos_encoding = self.to_rel_pos_encoding(rel_pos_feats)
+            rel_pos_encoding = self.split_heads(rel_pos_encoding)
+
+            q_rel_bias, k_rel_bias = self.qk_rel_pos_bias
+
+            rel_q = relative_shift(einsum(q + q_rel_bias, rel_pos_encoding, 'b n h d, p h d -> b n p h'))
+            rel_k = relative_shift(einsum(k + k_rel_bias, rel_pos_encoding, 'b n h d, p h d -> b n p h'))
+
+            rel_q, rel_k = tuple(t[..., :pool_seq_len, :] for t in (rel_q, rel_k))
+
+            rel_sim = add('b i j d, b j i d -> b i j d', rel_q, rel_k) * 0.5
+
+            sim = sim + rel_sim
+
         pairwise_from_sim = self.qk_to_pairwise(sim)
 
         outer_q, outer_k = self.to_outer_sum(single).chunk(2, dim = -1)
 
-        outer_sum = einx.add('b i d, b j d -> b i j d', outer_q, outer_k)
+        outer_sum = add('b i d, b j d -> b i j d', outer_q, outer_k)
 
         return outer_sum
 
@@ -304,6 +364,7 @@ class TransformerTower(Module):
         dim_pairwise = None,
         pairwise_every_num_single_blocks = 2,   # how often to do a pairwise block
         single_to_pairwise_heads = 32,          # they did 32
+        pool_size = 16,
         attn_kwargs: dict = dict(),
         ff_kwargs: dict = dict()
     ):
@@ -313,6 +374,8 @@ class TransformerTower(Module):
         layers = []
 
         self.pairwise_every = pairwise_every_num_single_blocks
+
+        self.rel_pos_features = RelativePosFeatures(pool_size)
 
         self.rotary_emb = RotaryEmbedding(dim_head_qk, max_positions = max_positions)
 
@@ -330,7 +393,7 @@ class TransformerTower(Module):
             single_to_pairwise, pairwise_attn, pairwise_ff = None, None, None
 
             if divisible_by(layer_index, self.pairwise_every):
-                single_to_pairwise = SingleToPairwise(dim = dim, dim_pairwise = dim_pairwise, heads = single_to_pairwise_heads)
+                single_to_pairwise = SingleToPairwise(dim = dim, dim_pairwise = dim_pairwise, heads = single_to_pairwise_heads, pool_size = pool_size)
                 pairwise_attn = PairwiseRowAttention(dim_pairwise)
                 pairwise_ff = FeedForward(dim = dim_pairwise, expansion_factor = ff_expansion_factor)
 
@@ -360,6 +423,8 @@ class TransformerTower(Module):
 
         pairwise = None
 
+        rel_pos_feats = self.rel_pos_features(single)
+
         rotary_emb = self.rotary_emb(seq_len)
 
         for (
@@ -374,7 +439,7 @@ class TransformerTower(Module):
             single = ff(single) + single
 
             if exists(maybe_single_to_pair):
-                pairwise = maybe_single_to_pair(single) + default(pairwise, 0.)
+                pairwise = maybe_single_to_pair(single, rel_pos_feats) + default(pairwise, 0.)
                 pairwise = maybe_pairwise_attn(pairwise) + pairwise
                 pairwise = maybe_pairwise_ff(pairwise) + pairwise
 
