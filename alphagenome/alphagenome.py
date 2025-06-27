@@ -47,10 +47,14 @@ class SandwichNorm(Module):
         self.post_block_dropout = nn.Dropout(dropout)
         self.post_rmsnorm = nn.RMSNorm(dim)
 
-    def forward(self, x):
+    def forward(
+        self,
+        x,
+        **kwargs
+    ):
         residual = x
         x = self.pre_rmsnorm(x)
-        out = self.block(x)
+        out = self.block(x, **kwargs)
         out = self.post_block_dropout(out)
         return self.post_rmsnorm(out) + residual
 
@@ -137,6 +141,45 @@ def FeedForward(
         nn.Dropout(dropout),
         Linear(dim_inner, dim)
     )
+
+# transformer
+
+class Transformer(Module):
+    def __init__(
+        self,
+        dim,
+        *,
+        depth,
+        heads = 8,
+        dim_head_qk = 128,
+        dim_head_v = 192,
+        dropout = 0.,
+        ff_expansion_factor = 2.,
+        attn_kwargs: dict = dict(),
+        ff_kwargs: dict = dict()
+    ):
+        super().__init__()
+        layers = []
+
+        for _ in range(depth):
+            attn = Attention(dim = dim, dim_head_qk = dim_head_qk, dim_head_v = dim_head_v, heads = heads)
+
+            ff = FeedForward(dim = dim, expansion_factor = ff_expansion_factor)
+
+            layers.append(ModuleList([
+                SandwichNorm(dim = dim, block = attn, dropout = dropout),
+                SandwichNorm(dim = dim, block = ff, dropout = dropout),
+            ]))
+
+        self.layers = ModuleList(layers)
+
+    def forward(self, x):
+
+        for attn, ff in self.layers:
+            x = attn(x)
+            x = ff(x)
+
+        return x
 
 # classes
 
