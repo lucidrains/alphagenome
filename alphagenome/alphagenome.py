@@ -100,6 +100,14 @@ class Attention(Module):
         self.k_norm = nn.LayerNorm(dim_head_qk, bias = False)
         self.v_norm = nn.LayerNorm(dim_head_v, bias = False)
 
+        # to attention bias
+
+        self.to_attn_bias = Sequential(
+            nn.RMSNorm(dim), # replace with BatchRMSNorm once crafted
+            nn.GELU(),
+            LinearNoBias(dim, heads),
+            Rearrange('b i j h -> b h i j')
+        )
         # variables
 
         self.qkv_dim_splits = qkv_proj_dim_out
@@ -108,7 +116,7 @@ class Attention(Module):
     def forward(
         self,
         x,
-        attn_bias = None
+        pairwise_feats = None # Float['b i j dp']
     ):
 
         q, k, v = self.to_qkv(x).split(self.qkv_dim_splits, dim = -1)
@@ -124,7 +132,9 @@ class Attention(Module):
 
         # add attention bias + softclamping
 
-        if exists(attn_bias):
+        if exists(pairwise_feats):
+            attn_bias = self.to_attn_bias(pairwise_feats)
+
             sim = softclamp(sim + attn_bias, clamp_value = self.softclamp_value)
 
         attn = sim.softmax(dim = -1)
