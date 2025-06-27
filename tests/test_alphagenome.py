@@ -1,6 +1,6 @@
 import pytest
 import torch
-from alphagenome.alphagenome import TransformerTower
+from alphagenome_pytorch.alphagenome import TransformerTower
 
 def test_attention():
 

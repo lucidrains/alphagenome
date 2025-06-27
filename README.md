@@ -14,7 +14,7 @@ $ pip install alphagenome-pytorch
 
 ```python
 import torch
-from alphagenome import TransformerTower
+from alphagenome_pytorch import TransformerTower
 
 transformer = TransformerTower(dim = 768, dim_pairwise = 128)
 

@@ -1,4 +1,4 @@
-from alphagenome.alphagenome import (
+from alphagenome_pytorch.alphagenome import (
     AlphaGenome,
     Attention,
     TransformerTower
