@@ -434,13 +434,13 @@ class TransformerTower(Module):
             maybe_pairwise_ff
         ) in self.layers:
 
-            single = attn(single, rotary_emb = rotary_emb, pairwise = None) + single
-            single = ff(single) + single
-
             if exists(maybe_single_to_pair):
                 pairwise = maybe_single_to_pair(single, rel_pos_feats) + default(pairwise, 0.)
                 pairwise = maybe_pairwise_attn(pairwise) + pairwise
                 pairwise = maybe_pairwise_ff(pairwise) + pairwise
+
+            single = attn(single, rotary_emb = rotary_emb, pairwise = None) + single
+            single = ff(single) + single
 
         return single, pairwise
 
