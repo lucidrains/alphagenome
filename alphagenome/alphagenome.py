@@ -283,6 +283,7 @@ class DNAEmbed(Module):
     ):
         super().__init__()
         assert is_odd(width)
+        self.dim_input = dim_input
         self.conv = nn.Conv1d(dim_input, dim, width, padding = width // 2)
         self.pointwise = nn.Conv1d(dim, dim, 1)
 
@@ -290,7 +291,7 @@ class DNAEmbed(Module):
         self,
         seq # Int['b n']
     ):
-        onehot = F.one_hot(seq, num_classes = 5).float()
+        onehot = F.one_hot(seq, num_classes = self.dim_input).float()
         x = rearrange(onehot, 'b n d -> b d n')
 
         out = self.conv(x)
