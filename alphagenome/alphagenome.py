@@ -2,12 +2,12 @@ from __future__ import annotations
 from functools import partial
 
 import torch
-from torch import nn
+from torch import nn, cat, stack, arange
 import torch.nn.functional as F
 from torch.nn import Linear, Sequential, Module, ModuleList
 
 from einops.layers.torch import Rearrange
-from einops import rearrange, einsum
+from einops import rearrange, repeat, einsum
 
 # ein notation
 
@@ -39,6 +39,35 @@ def default(v, d):
 
 def softclamp(t, value = 5.):
     return (t / value).tanh() * value
+
+# rotary, but with attenuation of short relative distance frequencies
+
+class RotaryEmbedding(Module):
+    def __init__(
+        self,
+        dim,
+        max_positions = 8192
+    ):
+        super().__init__()
+        num_freqs = dim // 2
+        inv_freq = 1. / (arange(num_freqs).float() + torch.logspace(1, max_positions - num_freqs + 1, num_freqs))
+        self.register_buffer('inv_freq', inv_freq)
+
+    def forward(
+        self,
+        seq_len
+    ):
+        device = self.inv_freq.device
+        t = arange(seq_len, device = device).type_as(self.inv_freq)
+        freqs = einsum(t, self.inv_freq, 'i , j -> i j')
+        return cat((freqs, freqs), dim = -1)
+
+def rotate_half(x):
+    x1, x2 = x.chunk(2, dim = -1)
+    return torch.cat((-x2, x1), dim = -1)
+
+def apply_rotary_pos_emb(pos, t):
+    return t * pos.cos() + rotate_half(t) * pos.sin()
 
 # prenorm and sandwich norm - they use sandwich norm for single rep, prenorm for pairwise rep
 
@@ -117,7 +146,8 @@ class Attention(Module):
     def forward(
         self,
         x,
-        pairwise_feats = None # Float['b i j dp']
+        pairwise_feats = None, # Float['b i j dp']
+        rotary_emb = None
     ):
 
         q, k, v = self.to_qkv(x).split(self.qkv_dim_splits, dim = -1)
@@ -129,6 +159,14 @@ class Attention(Module):
         q, k, v = self.q_norm(q), self.k_norm(k), self.v_norm(v)
 
         q = q * self.scale
+
+        # maybe rotary
+
+        if exists(rotary_emb):
+            q, k = tuple(apply_rotary_pos_emb(rotary_emb, t) for t in (q, k))
+
+        # similarities
+
         sim = einsum(q, k, 'b h i d, b j d -> b h i j')
 
         # add attention bias + softclamping
@@ -201,11 +239,14 @@ class Transformer(Module):
         dim_head_v = 192,
         dropout = 0.,
         ff_expansion_factor = 2.,
+        max_positions = 8192,
         attn_kwargs: dict = dict(),
         ff_kwargs: dict = dict()
     ):
         super().__init__()
         layers = []
+
+        self.rotary_emb = RotaryEmbedding(dim_head_qk, max_positions = max_positions)
 
         for _ in range(depth):
             attn = Attention(dim = dim, dim_head_qk = dim_head_qk, dim_head_v = dim_head_v, heads = heads)
@@ -221,8 +262,12 @@ class Transformer(Module):
 
     def forward(self, x):
 
+        seq_len = x.shape[1]
+
+        rotary_emb = self.rotary_emb(seq_len)
+
         for attn, ff in self.layers:
-            x = attn(x)
+            x = attn(x, rotary_emb = rotary_emb)
             x = ff(x)
 
         return x
