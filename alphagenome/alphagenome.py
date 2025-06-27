@@ -6,7 +6,8 @@ from torch import nn, cat, stack, arange
 import torch.nn.functional as F
 from torch.nn import Linear, Sequential, Module, ModuleList
 
-from einops.layers.torch import Rearrange
+import einx
+from einops.layers.torch import Rearrange, Reduce
 from einops import rearrange, repeat, einsum
 
 # ein notation
@@ -91,11 +92,10 @@ class NormWrapper(Module):
         x,
         **kwargs
     ):
-        residual = x
         x = self.pre_rmsnorm(x)
         out = self.block(x, **kwargs)
         out = self.post_block_dropout(out)
-        return self.post_rmsnorm(out) + residual
+        return self.post_rmsnorm(out)
 
 # attention
 
@@ -195,6 +195,48 @@ class Attention(Module):
         out = self.merge_heads(out)
         return self.to_out(out)
 
+# single to pairwise
+
+class SingleToPairwise(Module):
+    def __init__(
+        self,
+        dim,
+        pool_size = 16,
+        dim_pairwise = 128,
+        heads = 32
+    ):
+        super().__init__()
+        self.avg_pool = Reduce('b (n pool) d -> b n d', 'mean', pool = pool_size)
+
+        dim_inner = heads * dim_pairwise
+
+        self.split_heads = Rearrange('b n (h d) -> b n h d', h = heads)
+
+        self.to_outer_sum = Sequential(
+            LinearNoBias(dim, dim_pairwise * 2),
+            nn.GELU()
+        )
+
+        self.to_qk = LinearNoBias(dim, dim_inner * 2)
+        self.qk_to_pairwise = Linear(heads, dim_pairwise)
+
+    def forward(self, single):
+
+        single = self.avg_pool(single)
+
+        q, k = self.to_qk(single).chunk(2, dim = -1)
+        q, k = tuple(self.split_heads(t) for t in (q, k))
+
+        sim = einsum(q, k, 'b i h d, b j h d -> b i j h')
+
+        pairwise_from_sim = self.qk_to_pairwise(sim)
+
+        outer_q, outer_k = self.to_outer_sum(single).chunk(2, dim = -1)
+
+        outer_sum = einx.add('b i d, b j d -> b i j d', outer_q, outer_k)
+
+        return outer_sum
+
 # pairwise attention is a single headed attention across rows, they said columns did not help
 
 class PairwiseRowAttention(Module):
@@ -247,7 +289,7 @@ def FeedForward(
 
 # transformer
 
-class Transformer(Module):
+class TransformerTower(Module):
     def __init__(
         self,
         dim,
@@ -260,7 +302,8 @@ class Transformer(Module):
         ff_expansion_factor = 2.,
         max_positions = 8192,
         dim_pairwise = None,
-        pairwise_every_num_single_blocks = 2, # how often to do a pairwise block
+        pairwise_every_num_single_blocks = 2,   # how often to do a pairwise block
+        single_to_pairwise_heads = 32,          # they did 32
         attn_kwargs: dict = dict(),
         ff_kwargs: dict = dict()
     ):
@@ -284,20 +327,23 @@ class Transformer(Module):
 
             # maybe pairwise
 
-            pairwise_attn, pairwise_ff = None, None
+            single_to_pairwise, pairwise_attn, pairwise_ff = None, None, None
 
             if divisible_by(layer_index, self.pairwise_every):
+                single_to_pairwise = SingleToPairwise(dim = dim, dim_pairwise = dim_pairwise, heads = single_to_pairwise_heads)
                 pairwise_attn = PairwiseRowAttention(dim_pairwise)
                 pairwise_ff = FeedForward(dim = dim_pairwise, expansion_factor = ff_expansion_factor)
 
-                pairwise_attn = NormWrapper(dim = dim_pairwise, block = pairwise_attn)
-                pairwise_ff = NormWrapper(dim = dim_pairwise, block = pairwise_ff)
+                single_to_pairwise = NormWrapper(dim = dim, block = single_to_pairwise, dropout = dropout)
+                pairwise_attn = NormWrapper(dim = dim_pairwise, block = pairwise_attn, dropout = dropout)
+                pairwise_ff = NormWrapper(dim = dim_pairwise, block = pairwise_ff, dropout = dropout)
 
             # add to layers
 
             layers.append(ModuleList([
                 attn,
                 ff,
+                single_to_pairwise,
                 pairwise_attn,
                 pairwise_ff
             ]))
@@ -307,27 +353,30 @@ class Transformer(Module):
 
     def forward(
         self,
-        single,
-        pairwise = None
+        single
     ):
 
         seq_len = single.shape[1]
+
+        pairwise = None
 
         rotary_emb = self.rotary_emb(seq_len)
 
         for (
             attn,
             ff,
+            maybe_single_to_pair,
             maybe_pairwise_attn,
             maybe_pairwise_ff
         ) in self.layers:
 
-            single = attn(single, rotary_emb = rotary_emb, pairwise = pairwise)
-            single = ff(single)
+            single = attn(single, rotary_emb = rotary_emb, pairwise = None) + single
+            single = ff(single) + single
 
-            if exists(maybe_pairwise_attn):
-                pairwise = maybe_pairwise_attn(pairwise)
-                pairwise = maybe_pairwise_ff(pairwise)
+            if exists(maybe_single_to_pair):
+                pairwise = maybe_single_to_pair(single) + default(pairwise, 0.)
+                pairwise = maybe_pairwise_attn(pairwise) + pairwise
+                pairwise = maybe_pairwise_ff(pairwise) + pairwise
 
         return single, pairwise
 
@@ -387,6 +436,6 @@ class AlphaGenome(Module):
 
         dna_embed = self.to_dna_embed(seq)
 
-        attended = self.transformer(dna_embed, pairwise)
+        attended = self.transformer(dna_embed)
 
         return attended

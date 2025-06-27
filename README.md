@@ -4,6 +4,25 @@
 
 Implementation of [AlphaGenome](https://deepmind.google/discover/blog/alphagenome-ai-for-better-understanding-the-genome/), Deepmind's updated genomic attention model
 
+## Install
+
+```bash
+$ pip install alphagenome
+```
+
+## Usage
+
+```python
+import torch
+from alphagenome import TransformerTower
+
+transformer = TransformerTower(dim = 768, dim_pairwise = 128)
+
+single = torch.randn(2, 512, 768)
+
+attended_single, attended_pairwise = transformer(single)
+```
+
 ## Citations
 
 ```bibtex
