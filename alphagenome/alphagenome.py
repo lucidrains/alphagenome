@@ -2,6 +2,7 @@ from __future__ import annotations
 from functools import partial
 
 import torch
+from torch import nn
 import torch.nn.functional as F
 from torch.nn import Linear, Module, ModuleList
 
@@ -27,6 +28,9 @@ def exists(v):
 def default(v, d):
     return v if exists(v) else d
 
+def softclamp(t, value = 5.):
+    return (t / value).tanh() * value
+
 # attention
 
 class Attention(Module):
@@ -34,36 +38,81 @@ class Attention(Module):
         self,
         dim,
         dim_head = 64,
-        heads = 8
+        heads = 8,
+        dim_head_qk = 128,
+        dim_head_v = 192,
+        softclamp_value = 5. # they employ attention softclamping
     ):
         super().__init__()
         self.scale = dim_head ** -0.5
 
-        dim_inner = dim_head * heads
+        qkv_proj_dim_out = (dim_head_qk * heads, dim_head_qk, dim_head_v)
 
-        self.split_heads = Rearrange('b n (qkv h d) -> qkv b h n d', qkv = 3, h = heads)
-        self.merge_heads = Rearraneg('b h n d -> b n (h d)')
+        # splitting and merging of attention heads
 
-        self.to_qkv = LinearNoBias(dim, dim_inner * 3)
-        self.to_out = LinearNoBias(dim_inner, dim)
+        self.split_q_heads = Rearrange('b n (h d) -> b h n d', h = heads)
+        self.merge_heads = Rearrange('b h n d -> b n (h d)')
+
+        # projections
+
+        self.to_qkv = LinearNoBias(dim, sum(qkv_proj_dim_out))
+        self.to_out = LinearNoBias(dim_head_v * heads, dim)
+
+        # they add layernorms to queries, keys, and interestingly enough, values as well. first time i've seen this
+
+        self.q_norm = nn.LayerNorm(dim_head_qk, bias = False)
+        self.k_norm = nn.LayerNorm(dim_head_qk, bias = False)
+        self.v_norm = nn.LayerNorm(dim_head_v, bias = False)
+
+        # variables
+
+        self.qkv_dim_splits = qkv_proj_dim_out
+        self.softclamp_value = softclamp_value
 
     def forward(
         self,
-        x
+        x,
+        attn_bias = None
     ):
 
-        qkv = self.to_qkv(x)
-        q, k, v = self.split_heads(qkv)
+        q, k, v = self.to_qkv(x).split(self.qkv_dim_splits, dim = -1)
+
+        # they use multi-query attention, with only 1 key / value head - pretty unconventional, but maybe enough for genomic modeling
+
+        q = self.split_q_heads(q)
+
+        q, k, v = self.q_norm(q), self.k_norm(k), self.v_norm(v)
 
         q = q * self.scale
-        sim = einsum(q, k, 'b h i d, b h j d -> b h i j')
+        sim = einsum(q, k, 'b h i d, b j d -> b h i j')
+
+        # add attention bias + softclamping
+
+        if exists(attn_bias):
+            sim = softclamp(sim + attn_bias, clamp_value = self.softclamp_value)
 
         attn = sim.softmax(dim = -1)
 
-        out = einsum(attn, v, 'b h i j, b h j d -> b h i d')
+        out = einsum(attn, v, 'b h i j, b j d -> b h i d')
 
         out = self.merge_heads(out)
         return self.to_out(out)
+
+# feedforward
+
+def FeedForward(
+    dim,
+    *,
+    dropout = 0.,
+    expansion_factor = 2.,  # they only do expansion factor of 2, no glu
+):
+    dim_inner = int(dim * expansion_factor)
+
+    return Sequential(
+        Linear(dim, dim_inner),
+        nn.Dropout(dropout),
+        Linear(dim_inner, dim)
+    )
 
 # classes
 
