@@ -21,3 +21,16 @@ def test_down_up():
 
     x = torch.randn(1, 64, 8)
     assert up(down(x), x).shape == x.shape
+
+def test_alphagenome():
+    from alphagenome_pytorch import AlphaGenome
+
+    model = AlphaGenome()
+
+    dna = torch.randint(0, 5, (2, 8192))
+
+    pred_nucleotide_logits, single, pairwise = model(dna)
+
+    pred = pred_nucleotide_logits.argmax(dim = -1)
+
+    assert pred.shape == dna.shape

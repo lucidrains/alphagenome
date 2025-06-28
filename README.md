@@ -14,13 +14,13 @@ $ pip install alphagenome-pytorch
 
 ```python
 import torch
-from alphagenome_pytorch import TransformerTower
+from alphagenome_pytorch import AlphaGenome
 
-transformer = TransformerTower(dim = 768, dim_pairwise = 128)
+model = AlphaGenome()
 
-single = torch.randn(2, 512, 768)
+dna = torch.randint(0, 5, (2, 8192))
 
-attended_single, attended_pairwise = transformer(single)
+pred_nucleotide, single, pairwise = model(dna) # (2, 8192, 5), (2, 64, 1536), (2, 4, 4, 1536)
 ```
 
 ## Citations

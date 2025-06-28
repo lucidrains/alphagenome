@@ -1,5 +1,11 @@
 from alphagenome_pytorch.alphagenome import (
     AlphaGenome,
     Attention,
-    TransformerTower
+    PairwiseRowAttention,
+    RelativePosFeatures,
+    RotaryEmbedding,
+    FeedForward,
+    TransformerTower,
+    UpresBlock,
+    DownresBlock,
 )

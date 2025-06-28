@@ -32,6 +32,9 @@ def exists(v):
 def divisible_by(num, den):
     return (num % den) == 0
 
+def last(arr):
+    return arr[-1]
+
 def is_odd(num):
     return not divisible_by(num, 2)
 
@@ -128,15 +131,15 @@ class UpresBlock(Module):
     def forward(
         self,
         x,
-        unet_skip = None
+        skip = None
     ):
 
         residual = x[:, :-self.pad]
         out = self.conv(x) + residual
 
-        if exists(unet_skip):
+        if exists(skip):
             out = repeat(out, 'b c n -> b c (n upsample)', upsample = 2) * self.residual_scale
-            out = out + self.unet_conv(unet_skip)
+            out = out + self.unet_conv(skip)
 
         return self.conv_out(out) + out
 
@@ -384,7 +387,7 @@ class SingleToPairwise(Module):
             rel_q = relative_shift(einsum(q + q_rel_bias, rel_pos_encoding, 'b n h d, p h d -> b h n p'))
             rel_k = relative_shift(einsum(k + k_rel_bias, rel_pos_encoding, 'b n h d, p h d -> b h n p'))
 
-            rel_sim = add('b h i j, b h j i -> b h i j', rel_q, rel_k) * 0.5
+            rel_sim = add('b h i j, b h j i -> b i j h', rel_q, rel_k) * 0.5
 
             sim = sim + rel_sim
 
@@ -460,7 +463,7 @@ class TransformerTower(Module):
         dropout = 0.,
         ff_expansion_factor = 2.,
         max_positions = 8192,
-        dim_pairwise = None,
+        dim_pairwise = 128,
         pairwise_every_num_single_blocks = 2,   # how often to do a pairwise block
         single_to_pairwise_heads = 32,          # they did 32
         pool_size = 16,
@@ -556,8 +559,10 @@ class DNAEmbed(Module):
         super().__init__()
         assert is_odd(width)
         self.dim_input = dim_input
-        self.conv = nn.Conv1d(dim_input, dim, width, padding = width // 2)
-        self.pointwise = nn.Conv1d(dim, dim, 1)
+        self.conv = Conv1d(dim_input, dim, width, padding = width // 2)
+        self.pointwise = Conv1d(dim, dim, 1)
+
+        self.pool = Reduce('b d (n pool) -> b d n', 'max', pool = 2)
 
     def forward(
         self,
@@ -568,38 +573,96 @@ class DNAEmbed(Module):
 
         out = self.conv(x)
         out = out + self.pointwise(out)
-        return rearrange(out, 'b d n -> b n d')
+        pooled = self.pool(out) # think they downsample for dna embed block
+
+        return pooled, x
 
 # classes
 
 class AlphaGenome(Module):
     def __init__(
         self,
-        dim = 768,
+        dims: tuple[int, ...] = (
+            768,
+            896,
+            1024,
+            1152,
+            1280,
+            1408,
+            1536
+        ),
         basepairs = 5,
         dna_embed_width = 15,
-        dim_pairwise = None,
         transformer_kwargs: dict = dict()
     ):
         super().__init__()
+
         assert is_odd(dna_embed_width)
 
-        self.to_dna_embed = DNAEmbed(dim, dim_input = basepairs, width = dna_embed_width)
+        assert len(dims) >= 2
+        first_dim, *_, last_dim = dims
 
-        self.transformer = Transformer(
-            dim = dim,
-            dim_pairwise = dim_pairwise,
+        self.dna_embed = DNAEmbed(first_dim, dim_input = basepairs, width = dna_embed_width)
+
+        dim_with_input = (basepairs, *dims)
+        dim_pairs = zip(dim_with_input[:-1], dim_with_input[1:])
+
+        downs = []
+        ups = []
+
+        for layer_num, (dim_in, dim_out) in enumerate(dim_pairs, start = 1):
+            is_first = layer_num == 1
+            channel_diff = dim_out - dim_in
+
+            assert channel_diff > 0
+
+            if not is_first:
+                down = DownresBlock(dim_in, channels_to_add = channel_diff)
+                downs.append(down)
+
+            up = UpresBlock(dim_out, channels_to_remove = channel_diff)
+            ups.insert(0, up)
+
+
+        self.downs = ModuleList(downs)
+        self.ups = ModuleList(ups)
+
+        self.transformer = TransformerTower(
+            dim = last_dim,
             **transformer_kwargs
         )
 
     def forward(
         self,
-        seq,
-        pairwise
+        seq # Int['b n']
     ):
 
-        dna_embed = self.to_dna_embed(seq)
+        skips = []
 
-        attended = self.transformer(dna_embed)
+        # embed with one hot and add skip
 
-        return attended
+        x, skip = self.dna_embed(seq)
+        skips.append(skip)
+
+        # downs
+
+        for down in self.downs:
+            skips.append(x)
+            x = down(x)
+
+        x = rearrange(x, 'b d n -> b n d')
+
+        # attention
+
+        single, pairwise = self.transformer(x)
+
+        # ups with skips from down
+
+        x = rearrange(x, 'b n d -> b d n')
+
+        for up in self.ups:
+            x = up(x, skip = skips.pop())
+
+        pred = rearrange(x, 'b l n -> b n l') # 1bp resolution
+
+        return pred, single, pairwise
