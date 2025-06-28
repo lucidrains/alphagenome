@@ -34,3 +34,12 @@ def test_alphagenome():
     pred = pred_nucleotide_logits.argmax(dim = -1)
 
     assert pred.shape == dna.shape
+
+@pytest.mark.parametrize('channel_first', (False, True))
+def test_batchrmsnorm(channel_first):
+    from alphagenome_pytorch.alphagenome import BatchRMSNorm
+
+    rmsnorm = BatchRMSNorm(512, channel_first = channel_first)
+
+    x = torch.randn(1, 512, 512)
+    assert rmsnorm(x).shape == x.shape

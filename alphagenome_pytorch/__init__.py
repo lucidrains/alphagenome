@@ -8,4 +8,5 @@ from alphagenome_pytorch.alphagenome import (
     TransformerTower,
     UpresBlock,
     DownresBlock,
+    BatchRMSNorm
 )

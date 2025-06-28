@@ -4,7 +4,7 @@ from functools import partial
 import torch
 from torch import nn, cat, stack, arange, logspace
 import torch.nn.functional as F
-from torch.nn import Conv1d, Linear, Sequential, Module, ModuleList
+from torch.nn import Conv1d, Linear, Sequential, Module, ModuleList, LayerNorm, RMSNorm
 
 from torch.nn.utils.parametrize import register_parametrization
 
@@ -47,6 +47,49 @@ def default(v, d):
 def softclamp(t, value = 5.):
     return (t / value).tanh() * value
 
+def append_dims(t, ndims):
+    return t.shape(*t.shape, *((1,) * ndims))
+
+# batch rmsnorm
+
+class BatchRMSNorm(Module):
+    def __init__(
+        self,
+        dim_feat,
+        channel_first = False,
+        momentum = 0.9,
+        eps = 1e-5,
+    ):
+        super().__init__()
+        self.scale = dim_feat ** 0.5
+
+        self.eps = eps
+        self.momentum = 1. - momentum
+        self.gamma = nn.Parameter(torch.zeros(dim_feat))
+        self.channel_first = channel_first
+
+        self.register_buffer('running_var', torch.ones((dim_feat,)))
+
+    def forward(
+        self,
+        x,
+        update_running_var = None
+    ):
+        update_running_var = default(update_running_var, self.training)
+        running_var = self.running_var
+
+        if update_running_var:
+
+            to_reduce = rearrange(x, 'b d ... -> b ... d') if self.channel_first else x
+
+            batch_var = torch.var(to_reduce, dim = tuple(range(x.ndim - 1)))
+
+            running_var.lerp_(batch_var, self.momentum)
+
+        std = running_var.clamp(min = self.eps).sqrt()
+
+        return x * self.scale * (self.gamma + 1.) / std
+
 # convolutional unet related
 
 class WeightStandardConv(Conv1d):
@@ -60,7 +103,7 @@ class WeightStandardConv(Conv1d):
     ):
         super().__init__(dim, dim_out, width, *args, **kwargs)
 
-        register_parametrization(self, 'weight', nn.LayerNorm(self.weight.shape, elementwise_affine = False))
+        register_parametrization(self, 'weight', LayerNorm(self.weight.shape, elementwise_affine = False))
 
 class ConvBlock(Module):
     def __init__(
@@ -219,10 +262,10 @@ class NormWrapper(Module):
     ):
         super().__init__()
         self.block = block
-        self.pre_rmsnorm = nn.RMSNorm(dim) # they use an interesting variant of batchnorm, batch-rmsnorm. craft later and make sure it works distributed
+        self.pre_rmsnorm = RMSNorm(dim) # they use an interesting variant of batchnorm, batch-rmsnorm. craft later and make sure it works distributed
 
         self.post_block_dropout = nn.Dropout(dropout)
-        self.post_rmsnorm = nn.RMSNorm(dim) if sandwich else nn.Identity()
+        self.post_rmsnorm = RMSNorm(dim) if sandwich else nn.Identity()
 
     def forward(
         self,
@@ -247,7 +290,8 @@ class Attention(Module):
         dim_head_qk = 128,
         dim_head_v = 192,
         dim_pairwise = None,
-        softclamp_value = 5. # they employ attention softclamping
+        softclamp_value = 5., # they employ attention softclamping
+        use_qk_rmsnorm = True
     ):
         super().__init__()
         dim_pairwise = default(dim_pairwise, dim)
@@ -273,14 +317,15 @@ class Attention(Module):
 
         # they add layernorms to queries, keys, and interestingly enough, values as well. first time i've seen this
 
-        self.q_norm = nn.LayerNorm(dim_head_qk, bias = False)
-        self.k_norm = nn.LayerNorm(dim_head_qk, bias = False)
-        self.v_norm = nn.LayerNorm(dim_head_v, bias = False)
+        norm_klass = RMSNorm if use_qk_rmsnorm else partial(LayerNorm, bias = False)
+        self.q_norm = norm_klass(dim_head_qk)
+        self.k_norm = norm_klass(dim_head_qk)
+        self.v_norm = norm_klass(dim_head_v)
 
         # to attention bias
 
         self.to_attn_bias = Sequential(
-            nn.RMSNorm(dim_pairwise), # replace with BatchRMSNorm once crafted
+            RMSNorm(dim_pairwise), # replace with BatchRMSNorm once crafted
             nn.GELU(),
             LinearNoBias(dim_pairwise, heads),
             Rearrange('b i j (g h) -> b g h i j', g = groups)
