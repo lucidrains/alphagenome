@@ -243,6 +243,7 @@ class Attention(Module):
         dim,
         dim_head = 64,
         heads = 8,
+        kv_heads = 1,
         dim_head_qk = 128,
         dim_head_v = 192,
         dim_pairwise = None,
@@ -257,8 +258,13 @@ class Attention(Module):
 
         # splitting and merging of attention heads
 
-        self.split_q_heads = Rearrange('b n (h d) -> b h n d', h = heads)
-        self.merge_heads = Rearrange('b h n d -> b n (h d)')
+        assert divisible_by(heads, kv_heads)
+        groups = heads // kv_heads
+
+        self.split_q_heads = Rearrange('b n (g h d) -> b g h n d', h = kv_heads, g = groups)
+        self.split_kv_heads = Rearrange('b n (h d) -> b h n d', h = kv_heads)
+
+        self.merge_heads = Rearrange('b g h n d -> b n (g h d)')
 
         # projections
 
@@ -277,7 +283,7 @@ class Attention(Module):
             nn.RMSNorm(dim_pairwise), # replace with BatchRMSNorm once crafted
             nn.GELU(),
             LinearNoBias(dim_pairwise, heads),
-            Rearrange('b i j h -> b h i j')
+            Rearrange('b i j (g h) -> b g h i j', g = groups)
         )
         # variables
 
@@ -296,6 +302,7 @@ class Attention(Module):
         # they use multi-query attention, with only 1 key / value head - pretty unconventional, but maybe enough for genomic modeling
 
         q = self.split_q_heads(q)
+        k, v = tuple(self.split_kv_heads(t) for t in (k, v))
 
         q, k, v = self.q_norm(q), self.k_norm(k), self.v_norm(v)
 
@@ -308,7 +315,7 @@ class Attention(Module):
 
         # similarities
 
-        sim = einsum(q, k, 'b h i d, b j d -> b h i j')
+        sim = einsum(q, k, 'b g h i d, b h j d -> b g h i j')
 
         # add attention bias + softclamping
 
@@ -318,7 +325,7 @@ class Attention(Module):
             assert divisible_by(sim.shape[-1], attn_bias.shape[-1])
             expand_factor = sim.shape[-1] // attn_bias.shape[-1]
 
-            attn_bias = repeat(attn_bias, 'b h i j -> b h (i r1) (j r2)', r1 = expand_factor, r2 = expand_factor)
+            attn_bias = repeat(attn_bias, 'b g h i j -> b g h (i r1) (j r2)', r1 = expand_factor, r2 = expand_factor)
 
             sim = softclamp(sim + attn_bias, value = self.softclamp_value)
 
@@ -328,7 +335,7 @@ class Attention(Module):
 
         # aggregate
 
-        out = einsum(attn, v, 'b h i j, b j d -> b h i d')
+        out = einsum(attn, v, 'b g h i j, b h j d -> b g h i d')
 
         out = self.merge_heads(out)
         return self.to_out(out)
@@ -542,7 +549,7 @@ class TransformerTower(Module):
                 pairwise = maybe_pairwise_attn(pairwise) + pairwise
                 pairwise = maybe_pairwise_ff(pairwise) + pairwise
 
-            single = attn(single, rotary_emb = rotary_emb, pairwise = None) + single
+            single = attn(single, rotary_emb = rotary_emb, pairwise = pairwise) + single
             single = ff(single) + single
 
         return single, pairwise
