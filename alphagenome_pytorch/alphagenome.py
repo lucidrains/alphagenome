@@ -706,15 +706,15 @@ class AlphaGenome(Module):
 
         # attention
 
-        single, pairwise = self.transformer(x)
+        single, pairwise = self.transformer(x) # 1D 128bp resolution, 2D contact pairs
 
         # ups with skips from down
 
-        x = rearrange(x, 'b n d -> b d n')
+        x = rearrange(single, 'b n d -> b d n')
 
         for up in self.ups:
             x = up(x, skip = skips.pop())
 
-        pred = rearrange(x, 'b l n -> b n l') # 1bp resolution
+        pred = rearrange(x, 'b l n -> b n l') # 1D 1bp resolution
 
         return pred, single, pairwise
