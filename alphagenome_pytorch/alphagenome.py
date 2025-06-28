@@ -157,7 +157,8 @@ class UpresBlock(Module):
         self,
         dim,
         channels_to_remove = 128,
-        residual_scale_init = .9
+        residual_scale_init = .9,
+        has_skip = True
     ):
         super().__init__()
 
@@ -165,7 +166,7 @@ class UpresBlock(Module):
         self.pad = channels_to_remove
 
         self.conv = ConvBlock(dim, width = 1, dim_out = dim_out)
-        self.unet_conv = ConvBlock(dim_out, width = 1)
+        self.unet_conv = ConvBlock(dim_out, width = 1) if has_skip else None
 
         self.conv_out = ConvBlock(dim_out, width = 1)
 
@@ -176,12 +177,15 @@ class UpresBlock(Module):
         x,
         skip = None
     ):
+        length = x.shape[1]
+        residual = x[:, :(length - self.pad)]
 
-        residual = x[:, :-self.pad]
         out = self.conv(x) + residual
 
-        if exists(skip):
-            out = repeat(out, 'b c n -> b c (n upsample)', upsample = 2) * self.residual_scale
+        out = repeat(out, 'b c n -> b c (n upsample)', upsample = 2) * self.residual_scale
+
+        if exists(self.unet_conv):
+            assert exists(skip)
             out = out + self.unet_conv(skip)
 
         return self.conv_out(out) + out
@@ -664,6 +668,7 @@ class AlphaGenome(Module):
 
         for layer_num, (dim_in, dim_out) in enumerate(dim_pairs, start = 1):
             is_first = layer_num == 1
+
             channel_diff = dim_out - dim_in
 
             assert channel_diff > 0
@@ -672,7 +677,12 @@ class AlphaGenome(Module):
                 down = DownresBlock(dim_in, channels_to_add = channel_diff)
                 downs.append(down)
 
-            up = UpresBlock(dim_out, channels_to_remove = channel_diff)
+            up = UpresBlock(
+                dim_out,
+                channels_to_remove = channel_diff if not is_first else 0,
+                has_skip = not is_first
+            )
+
             ups.insert(0, up)
 
 
@@ -693,10 +703,12 @@ class AlphaGenome(Module):
 
         # embed with one hot and add skip
 
-        x, skip = self.dna_embed(seq)
+        dna_embed, skip = self.dna_embed(seq)
         skips.append(skip)
 
         # downs
+
+        x = dna_embed
 
         for down in self.downs:
             skips.append(x)
