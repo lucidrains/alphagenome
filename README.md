@@ -39,6 +39,8 @@ $ pytest tests
 
 That's it
 
+Vibe coding with some attention network is totally welcomed, if it works
+
 ## Citations
 
 ```bibtex
