@@ -4,7 +4,9 @@ from functools import partial
 import torch
 from torch import nn, cat, stack, arange, logspace
 import torch.nn.functional as F
-from torch.nn import Linear, Sequential, Module, ModuleList
+from torch.nn import Conv1d, Linear, Sequential, Module, ModuleList
+
+from torch.nn.utils.parametrize import register_parametrization
 
 from einx import add, multiply, greater
 from einops.layers.torch import Rearrange, Reduce
@@ -41,6 +43,104 @@ def default(v, d):
 
 def softclamp(t, value = 5.):
     return (t / value).tanh() * value
+
+# convolutional unet related
+
+class WeightStandardConv(Conv1d):
+    def __init__(
+        self,
+        dim,
+        dim_out,
+        width,
+        *args,
+        **kwargs
+    ):
+        super().__init__(dim, dim_out, width, *args, **kwargs)
+
+        register_parametrization(self, 'weight', nn.LayerNorm(self.weight.shape, elementwise_affine = False))
+
+class ConvBlock(Module):
+    def __init__(
+        self,
+        dim,
+        width = 5,
+        dim_out = None
+    ):
+        super().__init__()
+        assert is_odd(width)
+        dim_out = default(dim_out, dim)
+
+        conv_klass = Conv1d if width == 1 else WeightStandardConv
+
+        self.conv = conv_klass(dim, dim_out, width, padding = width // 2)
+
+    def forward(self, x):
+
+        x = F.gelu(x)
+        out = self.conv(x)
+        return out
+
+class DownresBlock(Module):
+    def __init__(
+        self,
+        dim,
+        channels_to_add = 128 # this is new as well? instead of doubling channels, they add 128 at a time, and use padding or slicing for the residual
+    ):
+        super().__init__()
+
+        dim_out = dim + channels_to_add
+        self.pad = channels_to_add
+
+        self.conv = ConvBlock(dim, width = 1, dim_out = dim_out)
+        self.conv_out = ConvBlock(dim_out, width = 1)
+
+        self.max_pool = Reduce('b d (n pool) -> b d n', 'max', pool = 2)
+
+    def forward(self, x):
+
+        residual = F.pad(x, (0, 0, 0, self.pad), value = 0.)
+
+        out = self.conv(x) + residual
+
+        out = self.conv_out(out) + out
+
+        return self.max_pool(out)
+
+class UpresBlock(Module):
+    def __init__(
+        self,
+        dim,
+        channels_to_remove = 128,
+        residual_scale_init = .9
+    ):
+        super().__init__()
+
+        dim_out = dim - channels_to_remove
+        self.pad = channels_to_remove
+
+        self.conv = ConvBlock(dim, width = 1, dim_out = dim_out)
+        self.unet_conv = ConvBlock(dim_out, width = 1)
+
+        self.conv_out = ConvBlock(dim_out, width = 1)
+
+        self.residual_scale = nn.Parameter(torch.ones(1,) * residual_scale_init)
+
+    def forward(
+        self,
+        x,
+        unet_skip = None
+    ):
+
+        residual = x[:, :-self.pad]
+        out = self.conv(x) + residual
+
+        if exists(unet_skip):
+            out = repeat(out, 'b c n -> b c (n upsample)', upsample = 2) * self.residual_scale
+            out = out + self.unet_conv(unet_skip)
+
+        return self.conv_out(out) + out
+
+# position related
 
 def relative_shift(t):
     *leading_dims, seq_len, dim = t.shape
