@@ -23,6 +23,22 @@ dna = torch.randint(0, 5, (2, 8192))
 pred_nucleotide, single, pairwise = model(dna) # (2, 8192, 5), (2, 64, 1536), (2, 4, 4, 1536)
 ```
 
+## Contributing
+
+First install locally with the following
+
+```bash
+$ pip install '.[test]' # or uv pip install . '[test]'
+```
+
+Then make your changes, add a test to `tests/test_alphagenome.py`
+
+```bash
+$ pytest tests
+```
+
+That's it
+
 ## Citations
 
 ```bibtex
