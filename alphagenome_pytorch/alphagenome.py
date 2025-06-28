@@ -629,6 +629,14 @@ class DNAEmbed(Module):
 
         return pooled, x
 
+class OrganismEmbedding(nn.Module):
+    def __init__(self, dim, num_organisms):
+        super().__init__()
+        self.embed = nn.Embedding(num_organisms, dim)
+    def forward(self, x, organism_index):
+        emb = self.embed(organism_index).unsqueeze(1)
+        return x + emb
+        
 # classes
 
 class AlphaGenome(Module):
@@ -645,6 +653,7 @@ class AlphaGenome(Module):
         ),
         basepairs = 5,
         dna_embed_width = 15,
+        num_organisms = 2,
         transformer_kwargs: dict = dict()
     ):
         super().__init__()
@@ -684,9 +693,12 @@ class AlphaGenome(Module):
             **transformer_kwargs
         )
 
+        self.organism_embed = OrganismEmbedding(last_dim, num_organisms)
+
     def forward(
         self,
-        seq # Int['b n']
+        seq, # Int['b n']
+        organism_index
     ):
 
         skips = []
@@ -703,13 +715,17 @@ class AlphaGenome(Module):
             x = down(x)
 
         x = rearrange(x, 'b d n -> b n d')
+        
+        # embed organism
+
+        x = self.organism_embed(x, organism_index)
 
         # attention
-
+        
         single, pairwise = self.transformer(x) # 1D 128bp resolution, 2D contact pairs
-
+        
         # ups with skips from down
-
+        
         x = rearrange(single, 'b n d -> b d n')
 
         for up in self.ups:

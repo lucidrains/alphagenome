@@ -19,8 +19,9 @@ from alphagenome_pytorch import AlphaGenome
 model = AlphaGenome()
 
 dna = torch.randint(0, 5, (2, 8192))
+organism_index = torch.tensor([0, 0], dtype=torch.long) # the organism that each sequence belongs to
 
-pred_nucleotide, single, pairwise = model(dna) # (2, 8192, 5), (2, 64, 1536), (2, 4, 4, 128)
+pred_nucleotide, single, pairwise = model(dna, organism_index) # (2, 8192, 5), (2, 64, 1536), (2, 4, 4, 128)
 print(pred_nucleotide.shape, single.shape, pairwise.shape)
 ```
 
