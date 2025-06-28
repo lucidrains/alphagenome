@@ -20,7 +20,8 @@ model = AlphaGenome()
 
 dna = torch.randint(0, 5, (2, 8192))
 
-pred_nucleotide, single, pairwise = model(dna) # (2, 8192, 5), (2, 64, 1536), (2, 4, 4, 1536)
+pred_nucleotide, single, pairwise = model(dna) # (2, 8192, 5), (2, 64, 1536), (2, 4, 4, 128)
+print(pred_nucleotide.shape, single.shape, pairwise.shape)
 ```
 
 ## Contributing
