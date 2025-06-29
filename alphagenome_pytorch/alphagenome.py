@@ -4,7 +4,7 @@ from functools import partial
 import torch
 from torch import nn, cat, stack, arange, logspace
 import torch.nn.functional as F
-from torch.nn import Conv1d, Linear, Sequential, Module, ModuleList, LayerNorm, RMSNorm
+from torch.nn import Conv1d, Linear, Sequential, Module, ModuleList, LayerNorm, RMSNorm, ModuleDict
 
 from torch.nn.utils.parametrize import register_parametrization
 
@@ -668,7 +668,7 @@ class OutputEmbedding(nn.Module):
 class OutputPairEmbedding(nn.Module):
     def __init__(self, pair_dim=128, num_organisms=2):
         super().__init__()
-        self.norm = nn.LayerNorm(pair_dim)
+        self.norm = RMSNorm(pair_dim)
         self.embed = nn.Embedding(num_organisms, pair_dim)
         self.activation = nn.GELU()
 
@@ -678,6 +678,66 @@ class OutputPairEmbedding(nn.Module):
         emb = self.embed(organism_index).view(-1, 1, 1, x.size(-1))  # (B, 1, 1, D)
         x = self.norm(x) + emb
         return self.activation(x)
+
+# output heads
+
+class SimpleOutputHead(nn.Module):
+    def __init__(self, input_dim, out_dim):
+        super().__init__()
+        self.linear = nn.Linear(input_dim, out_dim)
+        self.scale = nn.Parameter(torch.zeros(out_dim))
+    def forward(self, x):
+        x = self.linear(x)
+        return F.softplus(x) * F.softplus(self.scale)
+        
+class ContactMapHead(nn.Module):
+    def __init__(self, input_dim, out_dim, num_organisms):
+        super().__init__()
+        self.norm = RMSNorm(input_dim)
+        self.embed = nn.Embedding(num_organisms, input_dim)
+        self.gelu = nn.GELU()
+        self.proj = nn.Linear(input_dim, out_dim)
+        
+    def forward(self, x, organism_index):
+        x = (x + x.transpose(1, 2)) / 2.0  # symmetrize
+        x = self.norm(x) + self.embed(organism_index).unsqueeze(1).unsqueeze(1)
+        x = self.gelu(x)
+        return self.proj(x)
+
+class SpliceSiteClassifier(nn.Module):
+    def __init__(self, input_dim):
+        super().__init__()
+        self.linear = nn.Linear(input_dim, 5)  # Donor+, Acceptor+, Donor-, Acceptor-, None
+    def forward(self, x):
+        return F.softmax(self.linear(x), dim=-1)
+
+class SpliceSiteUsage(nn.Module):
+    def __init__(self, input_dim, n_contexts):
+        super().__init__()
+        self.linear = nn.Linear(input_dim, n_contexts)
+    def forward(self, x):
+        return torch.sigmoid(self.linear(x))
+
+class SpliceJunctionHead(nn.Module):
+    def __init__(self, input_dim, hidden_dim, n_contexts):
+        super().__init__()
+        self.project = nn.Linear(input_dim, hidden_dim)
+        self.scale = nn.Parameter(torch.ones(n_contexts, hidden_dim))
+        self.offset = nn.Parameter(torch.zeros(n_contexts, hidden_dim))
+        self.n_contexts = n_contexts
+
+    def tissue_scaled_rope(self, x, indices):
+        x = x[torch.arange(x.size(0)).unsqueeze(1), indices]  # B, P, H
+        x = x.unsqueeze(2) * self.scale.unsqueeze(0).unsqueeze(0) + self.offset.unsqueeze(0).unsqueeze(0)
+        x = apply_rotary_pos_emb(indices, x)
+        return x  # B, P, T, H
+
+    def forward(self, x, donor_idx, acceptor_idx):
+        x_proj = self.project(x)
+        donor_embed = self.tissue_scaled_rope(x_proj, donor_idx)
+        acceptor_embed = self.tissue_scaled_rope(x_proj, acceptor_idx)
+        scores = torch.einsum('bdth,bath->bdat', donor_embed, acceptor_embed)
+        return F.softplus(scores)
         
 # classes
 
@@ -696,7 +756,8 @@ class AlphaGenome(Module):
         basepairs = 5,
         dna_embed_width = 15,
         num_organisms = 2,
-        transformer_kwargs: dict = dict()
+        transformer_kwargs: dict = dict(),
+        outheads_kwargs: dict = dict()
     ):
         super().__init__()
 
@@ -747,7 +808,46 @@ class AlphaGenome(Module):
         self.outembed_1bp = OutputEmbedding(first_dim, num_organisms, skip_dim=2*last_dim)
         self.outembed_pair = OutputPairEmbedding(2**len(dims), num_organisms)
 
-    def forward(
+        self.heads = {}
+        for organism, kwargs in outheads_kwargs.items():
+            self.heads[organism] = self.add_heads(
+                num_organisms = num_organisms, 
+                dim_1bp = last_dim,
+                dim_128bp = 2*last_dim, 
+                dim_contacts = 2**len(dims), 
+                **kwargs
+            )
+
+    def add_heads(
+        self, 
+        num_organisms,
+        dim_1bp,
+        dim_128bp,
+        dim_contacts,
+        num_tracks_1bp,
+        num_tracks_128bp,
+        num_splicing_contexts,
+        hidden_dim_splice_juncs=512
+    ):
+        heads = ModuleDict({
+            # RNA-seq, CAGE, ATAC, DNAse and PRO-Cap
+            "1bp_tracks": SimpleOutputHead(dim_1bp, num_tracks_1bp),
+            
+            # TF ChIP-seq and Histone ChIP-seq
+            "128bp_tracks": SimpleOutputHead(dim_128bp, num_tracks_128bp),
+
+            # Contact Maps
+            "contact_head": ContactMapHead(dim_contacts, dim_contacts, num_organisms),
+
+            # Splicing
+            "splice_probs": SpliceSiteClassifier(dim_1bp),
+            "splice_usage": SpliceSiteUsage(dim_1bp, num_splicing_contexts),
+            "splice_juncs": SpliceJunctionHead(dim_1bp, hidden_dim_splice_juncs, num_splicing_contexts)
+        })
+
+        return heads
+        
+    def get_embeddings(
         self,
         seq, # Int['b n']
         organism_index
@@ -794,3 +894,29 @@ class AlphaGenome(Module):
         embeddings_pair = self.outembed_pair(pairwise, organism_index)
 
         return embeddings_1bp, embeddings_128bp, embeddings_pair
+    
+    def forward(self, seq, organism_index, splice_donor_idx, splice_acceptor_idx):
+
+        # process sequence
+        
+        embeddings_1bp, embeddings_128bp, embeddings_pair = self.get_embeddings(seq, organism_index)
+
+        # get output tracks
+        out = {}
+        for organism, heads in self.heads.items():
+            out[organism] = {
+                "1bp_tracks": heads["1bp_tracks"](embeddings_1bp),
+                "128bp_tracks": heads["128bp_tracks"](embeddings_128bp),
+                "contact_head": heads["contact_head"](embeddings_pair, organism_index),
+                "splice_probs": heads["splice_probs"](embeddings_1bp),
+                "splice_usage": heads["splice_usage"](embeddings_1bp),
+                #"splice_juncs": heads["splice_juncs"](embeddings_1bp, splice_donor_idx, splice_acceptor_idx)
+            }
+        
+        return out
+
+
+
+
+        
+        
