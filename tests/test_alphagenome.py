@@ -28,8 +28,9 @@ def test_alphagenome():
     model = AlphaGenome()
 
     dna = torch.randint(0, 5, (2, 8192))
+    organism_index = torch.tensor([0, 0], dtype=torch.long)
 
-    pred_nucleotide_logits, single, pairwise = model(dna)
+    pred_nucleotide_logits, single, pairwise = model(dna, organism_index)
 
     pred = pred_nucleotide_logits.argmax(dim = -1)
 
