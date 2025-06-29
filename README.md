@@ -4,6 +4,11 @@
 
 Implementation of [AlphaGenome](https://deepmind.google/discover/blog/alphagenome-ai-for-better-understanding-the-genome/), Deepmind's updated genomic attention model
 
+
+## Appreciation
+
+- [Miquel Girotto](https://github.com/MiqG) for contributing the organism and output embedding!
+
 ## Install
 
 ```bash
