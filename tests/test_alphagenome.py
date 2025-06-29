@@ -48,30 +48,33 @@ def test_batchrmsnorm(channel_first):
 def test_splicing_heads():
     from alphagenome_pytorch.alphagenome import AlphaGenome
 
-    outheads_kwargs = {
-        "human": {
-            "num_tracks_1bp": 10,
-            "num_tracks_128bp": 10,
-            "num_splicing_contexts": 64, # 2 strands x num. CURIE conditions
-        }
-    }
+    model = AlphaGenome()
 
-    model = AlphaGenome(outheads_kwargs=outheads_kwargs)
+    model.add_splice_heads(
+        'human',
+        num_tracks_1bp = 10,
+        num_tracks_128bp = 10,
+        num_splicing_contexts = 64, # 2 strands x num. CURIE conditions
+    )
 
     dna = torch.randint(0, 5, (2, 8192))
 
     organism_index = torch.tensor([0, 0]) # the organism that each sequence belongs to
-    splice_donor_idx = torch.tensor([[10,100,34], [24,546,870]])
-    splice_acceptor_idx = torch.tensor([[15,103,87], [56,653,900]])
+    splice_donor_idx = torch.tensor([[10, 100, 34], [24, 546, 870]])
+    splice_acceptor_idx = torch.tensor([[15, 103, 87], [56, 653, 900]])
 
     # get sequence embeddings
 
     embeddings_1bp, embeddings_128bp, embeddings_pair = model(dna, organism_index, return_embeds = True) # (2, 8192, 1536), (2, 64, 3072), (2, 4, 4, 128)
-    print(embeddings_1bp.shape, embeddings_128bp.shape, embeddings_pair.shape)
 
     # get track predictions
 
-    out = model(dna, organism_index, splice_donor_idx = splice_donor_idx, splice_acceptor_idx = splice_acceptor_idx)
+    out = model(
+        dna,
+        organism_index,
+        splice_donor_idx = splice_donor_idx,
+        splice_acceptor_idx = splice_acceptor_idx
+    )
 
     for organism, outputs in out.items():
         for out_head, out_values in outputs.items():

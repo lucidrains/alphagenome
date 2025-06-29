@@ -17,18 +17,35 @@ $ pip install alphagenome-pytorch
 
 ## Usage
 
+The main unet transformer, without any heads
+
 ```python
 import torch
 from alphagenome_pytorch import AlphaGenome
 
-outheads_kwargs = {
-    "human": {
-        "num_tracks_1bp": 10,
-        "num_tracks_128bp": 10,
-        "num_splicing_contexts": 64, # 2 strands x num. CURIE conditions
-    }
-}
-model = AlphaGenome(outheads_kwargs=outheads_kwargs)
+model = AlphaGenome()
+
+dna = torch.randint(0, 5, (2, 8192))
+
+organism_index = torch.randint(0, 2, (2,)) # defaults to 2 organisms, 0 for human, 1 for mouse
+
+embeds_1bp, embeds_128bp, embeds_pair = model(dna, organism_index) # (2, 8192, 1536), (2, 64, 3072), (2, 4, 4, 128)
+```
+
+Adding splice heads (thanks to @MiqG)
+
+```python
+import torch
+from alphagenome_pytorch import AlphaGenome
+
+model = AlphaGenome()
+
+model.add_splice_heads(
+    'human',
+    num_tracks_1bp = 10,
+    num_tracks_128bp = 10,
+    num_splicing_contexts = 64, # 2 strands x num. CURIE conditions
+)
 
 dna = torch.randint(0, 5, (2, 8192))
 
@@ -39,15 +56,14 @@ splice_acceptor_idx = torch.tensor([[15, 103, 87], [56, 653, 900]])
 # get sequence embeddings
 
 embeddings_1bp, embeddings_128bp, embeddings_pair = model(dna, organism_index, return_embeds = True) # (2, 8192, 1536), (2, 64, 3072), (2, 4, 4, 128)
-print(embeddings_1bp.shape, embeddings_128bp.shape, embeddings_pair.shape)
 
 # get track predictions
 
 out = model(
-  dna,
-  organism_index,
-  splice_donor_idx = splice_donor_idx,
-  splice_acceptor_idx = splice_acceptor_idx
+    dna,
+    organism_index,
+    splice_donor_idx = splice_donor_idx,
+    splice_acceptor_idx = splice_acceptor_idx
 )
 
 for organism, outputs in out.items():

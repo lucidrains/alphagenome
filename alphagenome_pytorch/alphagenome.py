@@ -933,7 +933,6 @@ class AlphaGenome(Module):
         dna_embed_width = 15,
         num_organisms = 2,
         transformer_kwargs: dict = dict(),
-        outheads_kwargs: dict = dict()
     ):
         super().__init__()
 
@@ -985,53 +984,46 @@ class AlphaGenome(Module):
         self.outembed_1bp = OutputEmbedding(first_dim, num_organisms, skip_dim=2*last_dim)
         self.outembed_pair = OutputPairEmbedding(2**len(dims), num_organisms)
 
-        # head related
+        # heads
+
+        self.num_organisms = num_organisms
+        self.dim_1bp = last_dim
+        self.dim_128bp = 2 * last_dim
+        self.dim_contacts = 2 ** len(dims)
 
         self.heads = ModuleDict()
         self.head_forward_arg_names = dict()
 
-        for organism, kwargs in outheads_kwargs.items():
-            heads = self.add_splice_heads(
-                num_organisms = num_organisms, 
-                dim_1bp = last_dim,
-                dim_128bp = 2 * last_dim, 
-                dim_contacts = 2 ** len(dims),
-                **kwargs
-            )
-
-            self.head_forward_arg_names[organism] = {head_name: get_function_arg_names(head.forward) for head_name, head in heads.items()}
-            self.heads[organism] = heads
-
     def add_splice_heads(
-        self, 
-        num_organisms,
-        dim_1bp,
-        dim_128bp,
-        dim_contacts,
+        self,
+        organism,
         num_tracks_1bp,
         num_tracks_128bp,
         num_splicing_contexts,
         hidden_dim_splice_juncs = 512
     ):
-        heads = ModuleDict({
+        # head related
+
+        organism_heads = ModuleDict({
 
             # RNA-seq, CAGE, ATAC, DNAse and PRO-Cap
-            "1bp_tracks": SimpleOutputHead1bp(dim_1bp, num_tracks_1bp),
+            "1bp_tracks": SimpleOutputHead1bp(self.dim_1bp, num_tracks_1bp),
             
             # TF ChIP-seq and Histone ChIP-seq
-            "128bp_tracks": SimpleOutputHead128bp(dim_128bp, num_tracks_128bp),
+            "128bp_tracks": SimpleOutputHead128bp(self.dim_128bp, num_tracks_128bp),
 
             # Contact Maps
-            "contact_head": ContactMapHead(dim_contacts, dim_contacts, num_organisms),
+            "contact_head": ContactMapHead(self.dim_contacts, self.dim_contacts, self.num_organisms),
 
             # Splicing
-            "splice_probs": SpliceSiteClassifier(dim_1bp),
-            "splice_usage": SpliceSiteUsage(dim_1bp, num_splicing_contexts),
-            "splice_juncs": SpliceJunctionHead(dim_1bp, hidden_dim_splice_juncs, num_splicing_contexts)
+            "splice_probs": SpliceSiteClassifier(self.dim_1bp),
+            "splice_usage": SpliceSiteUsage(self.dim_1bp, num_splicing_contexts),
+            "splice_juncs": SpliceJunctionHead(self.dim_1bp, hidden_dim_splice_juncs, num_splicing_contexts)
         })
 
-        return heads
-        
+        self.heads[organism] = organism_heads
+        self.head_forward_arg_names[organism] = {head_name: get_function_arg_names(head.forward) for head_name, head in organism_heads.items()}
+
     def get_embeds(
         self,
         seq, # Int['b n']
