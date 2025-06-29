@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 from functools import partial
+from collections import namedtuple
 
 import torch
 import torch.distributed as dist
@@ -26,6 +27,12 @@ from einops import rearrange, repeat, einsum
 # constants
 
 LinearNoBias = partial(Linear, bias = False)
+
+Embeds = namedtuple('Embeds', [
+    'embeds_1bp',
+    'embeds_128bp',
+    'embeds_pair',
+])
 
 # functions
 
@@ -1071,7 +1078,7 @@ class AlphaGenome(Module):
         embeds_1bp = self.outembed_1bp(pred, organism_index, embeds_128bp)
         embeds_pair = self.outembed_pair(pairwise, organism_index)
 
-        return embeds_1bp, embeds_128bp, embeds_pair
+        return Embeds(embeds_1bp, embeds_128bp, embeds_pair)
     
     def forward(
         self,
