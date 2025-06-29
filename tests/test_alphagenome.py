@@ -30,7 +30,7 @@ def test_alphagenome():
     dna = torch.randint(0, 5, (2, 8192))
     organism_index = torch.tensor([0, 0], dtype=torch.long)
 
-    pred_nucleotide_logits, single, pairwise = model(dna, organism_index)
+    pred_nucleotide_logits, single, pairwise = model.get_embeddings(dna, organism_index)
 
     pred = pred_nucleotide_logits.argmax(dim = -1)
 
