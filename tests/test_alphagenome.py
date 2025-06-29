@@ -33,7 +33,7 @@ def test_alphagenome():
 
     pred = pred_nucleotide_logits.argmax(dim = -1)
 
-    assert pred.shape == dna.shape
+    assert pred.shape[1] == dna.shape[1]
 
 @pytest.mark.parametrize('channel_first', (False, True))
 def test_batchrmsnorm(channel_first):

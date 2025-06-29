@@ -157,7 +157,8 @@ class UpresBlock(Module):
         self,
         dim,
         channels_to_remove = 128,
-        residual_scale_init = .9
+        residual_scale_init = .9,
+        has_skip = True
     ):
         super().__init__()
 
@@ -165,7 +166,7 @@ class UpresBlock(Module):
         self.pad = channels_to_remove
 
         self.conv = ConvBlock(dim, width = 1, dim_out = dim_out)
-        self.unet_conv = ConvBlock(dim_out, width = 1)
+        self.unet_conv = ConvBlock(dim_out, width = 1) if has_skip else None
 
         self.conv_out = ConvBlock(dim_out, width = 1)
 
@@ -176,12 +177,15 @@ class UpresBlock(Module):
         x,
         skip = None
     ):
+        length = x.shape[1]
+        residual = x[:, :(length - self.pad)]
 
-        residual = x[:, :-self.pad]
         out = self.conv(x) + residual
 
-        if exists(skip):
-            out = repeat(out, 'b c n -> b c (n upsample)', upsample = 2) * self.residual_scale
+        out = repeat(out, 'b c n -> b c (n upsample)', upsample = 2) * self.residual_scale
+
+        if exists(self.unet_conv):
+            assert exists(skip)
             out = out + self.unet_conv(skip)
 
         return self.conv_out(out) + out
@@ -638,19 +642,18 @@ class OrganismEmbedding(nn.Module):
         return x + emb
 
 class OutputEmbedding(nn.Module):
-    def __init__(self, input_dim, num_organisms=2, skip_proj=True):
+    def __init__(self, input_dim, num_organisms=2, skip_dim=None):
         super().__init__()
-        self.combine = nn.Linear(2 * input_dim, input_dim)
+        self.double_features = nn.Linear(input_dim, 2 * input_dim)
         self.skip_proj = (
-            nn.Linear(input_dim, input_dim, bias=False) if skip_proj else None
+            nn.Linear(skip_dim, 2 * input_dim, bias=False) if skip_dim is not None else None
         )
-        self.norm = RMSNorm(input_dim)
-        self.embed = nn.Embedding(num_organisms, input_dim)
+        self.norm = BatchRMSNorm(2 * input_dim)
+        self.embed = nn.Embedding(num_organisms, 2 * input_dim)
         self.activation = nn.GELU()
 
     def forward(self, x, organism_index, skip_x=None):
-        # x: (B, L, D)
-        x = self.combine(torch.cat([x, x], dim=-1))  # double the input features
+        x = self.double_features(x)  # double the input features
 
         if skip_x is not None and self.skip_proj is not None:
             skip = self.skip_proj(skip_x)
@@ -658,7 +661,7 @@ class OutputEmbedding(nn.Module):
             skip = skip.repeat_interleave(repeat_factor, dim=1)
             x = x + skip
 
-        emb = self.embed(organism_index).unsqueeze(1)  # (B, 1, D)
+        emb = self.embed(organism_index).unsqueeze(1) 
         x = self.norm(x) + emb
         return self.activation(x)
 
@@ -712,6 +715,7 @@ class AlphaGenome(Module):
 
         for layer_num, (dim_in, dim_out) in enumerate(dim_pairs, start = 1):
             is_first = layer_num == 1
+
             channel_diff = dim_out - dim_in
 
             assert channel_diff > 0
@@ -720,7 +724,12 @@ class AlphaGenome(Module):
                 down = DownresBlock(dim_in, channels_to_add = channel_diff)
                 downs.append(down)
 
-            up = UpresBlock(dim_out, channels_to_remove = channel_diff)
+            up = UpresBlock(
+                dim_out,
+                channels_to_remove = channel_diff if not is_first else 0,
+                has_skip = not is_first
+            )
+
             ups.insert(0, up)
 
 
@@ -735,8 +744,8 @@ class AlphaGenome(Module):
         self.organism_embed = OrganismEmbedding(last_dim, num_organisms)
 
         self.outembed_128bp = OutputEmbedding(last_dim, num_organisms)
-        self.outembed_1bp = OutputEmbedding(first_dim, num_organisms, skip_proj=True)
-        self.outembed_pair = OutputPairEmbedding(128, num_organisms)
+        self.outembed_1bp = OutputEmbedding(first_dim, num_organisms, skip_dim=2*last_dim)
+        self.outembed_pair = OutputPairEmbedding(2**len(dims), num_organisms)
 
     def forward(
         self,
@@ -746,18 +755,18 @@ class AlphaGenome(Module):
 
         skips = []
 
-        # embed with one hot and add skip, 5 -> 768 features
+        # embed with one hot and add skip
 
-        x, skip = self.dna_embed(seq)
-        print(x.shape)
+        dna_embed, skip = self.dna_embed(seq)
         skips.append(skip)
 
-        # downs, 768 -> 1536 features
+        # downs
+
+        x = dna_embed
 
         for down in self.downs:
             skips.append(x)
             x = down(x)
-            print(x.shape)
 
         x = rearrange(x, 'b d n -> b n d')
         
@@ -769,20 +778,18 @@ class AlphaGenome(Module):
         
         single, pairwise = self.transformer(x) # 1D 128bp resolution, 2D contact pairs
         
-        # ups with skips from down, 1536 -> 768 features
+        # ups with skips from down
         
         x = rearrange(single, 'b n d -> b d n')
 
         for up in self.ups:
             x = up(x, skip = skips.pop())
-            print(x.shape)
             
         pred = rearrange(x, 'b d n -> b n d') # 1D 1bp resolution
 
         # embed organism to outputs
 
         embeddings_128bp = self.outembed_128bp(single, organism_index)
-        print(pred.shape, embeddings_128bp.shape)
         embeddings_1bp = self.outembed_1bp(pred, organism_index, embeddings_128bp)
         embeddings_pair = self.outembed_pair(pairwise, organism_index)
 
