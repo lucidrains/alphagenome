@@ -636,6 +636,45 @@ class OrganismEmbedding(nn.Module):
     def forward(self, x, organism_index):
         emb = self.embed(organism_index).unsqueeze(1)
         return x + emb
+
+class OutputEmbedding(nn.Module):
+    def __init__(self, input_dim, num_organisms=2, skip_proj=True):
+        super().__init__()
+        self.combine = nn.Linear(2 * input_dim, input_dim)
+        self.skip_proj = (
+            nn.Linear(input_dim, input_dim, bias=False) if skip_proj else None
+        )
+        self.norm = RMSNorm(input_dim)
+        self.embed = nn.Embedding(num_organisms, input_dim)
+        self.activation = nn.GELU()
+
+    def forward(self, x, organism_index, skip_x=None):
+        # x: (B, L, D)
+        x = self.combine(torch.cat([x, x], dim=-1))  # double the input features
+
+        if skip_x is not None and self.skip_proj is not None:
+            skip = self.skip_proj(skip_x)
+            repeat_factor = x.shape[1] // skip.shape[1]
+            skip = skip.repeat_interleave(repeat_factor, dim=1)
+            x = x + skip
+
+        emb = self.embed(organism_index).unsqueeze(1)  # (B, 1, D)
+        x = self.norm(x) + emb
+        return self.activation(x)
+
+class OutputPairEmbedding(nn.Module):
+    def __init__(self, pair_dim=128, num_organisms=2):
+        super().__init__()
+        self.norm = nn.LayerNorm(pair_dim)
+        self.embed = nn.Embedding(num_organisms, pair_dim)
+        self.activation = nn.GELU()
+
+    def forward(self, x, organism_index):
+        # x: (B, N, N, D)
+        x = (x + x.transpose(1, 2)) / 2.0  # symmetrize
+        emb = self.embed(organism_index).view(-1, 1, 1, x.size(-1))  # (B, 1, 1, D)
+        x = self.norm(x) + emb
+        return self.activation(x)
         
 # classes
 
@@ -695,6 +734,10 @@ class AlphaGenome(Module):
 
         self.organism_embed = OrganismEmbedding(last_dim, num_organisms)
 
+        self.outembed_128bp = OutputEmbedding(last_dim, num_organisms)
+        self.outembed_1bp = OutputEmbedding(first_dim, num_organisms, skip_proj=True)
+        self.outembed_pair = OutputPairEmbedding(128, num_organisms)
+
     def forward(
         self,
         seq, # Int['b n']
@@ -703,16 +746,18 @@ class AlphaGenome(Module):
 
         skips = []
 
-        # embed with one hot and add skip
+        # embed with one hot and add skip, 5 -> 768 features
 
         x, skip = self.dna_embed(seq)
+        print(x.shape)
         skips.append(skip)
 
-        # downs
+        # downs, 768 -> 1536 features
 
         for down in self.downs:
             skips.append(x)
             x = down(x)
+            print(x.shape)
 
         x = rearrange(x, 'b d n -> b n d')
         
@@ -724,13 +769,21 @@ class AlphaGenome(Module):
         
         single, pairwise = self.transformer(x) # 1D 128bp resolution, 2D contact pairs
         
-        # ups with skips from down
+        # ups with skips from down, 1536 -> 768 features
         
         x = rearrange(single, 'b n d -> b d n')
 
         for up in self.ups:
             x = up(x, skip = skips.pop())
+            print(x.shape)
+            
+        pred = rearrange(x, 'b d n -> b n d') # 1D 1bp resolution
 
-        pred = rearrange(x, 'b l n -> b n l') # 1D 1bp resolution
+        # embed organism to outputs
 
-        return pred, single, pairwise
+        embeddings_128bp = self.outembed_128bp(single, organism_index)
+        print(pred.shape, embeddings_128bp.shape)
+        embeddings_1bp = self.outembed_1bp(pred, organism_index, embeddings_128bp)
+        embeddings_pair = self.outembed_pair(pairwise, organism_index)
+
+        return embeddings_1bp, embeddings_128bp, embeddings_pair
