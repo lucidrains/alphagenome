@@ -2,7 +2,8 @@ from __future__ import annotations
 from functools import partial
 
 import torch
-from torch import nn, cat, stack, arange, logspace
+import torch.distributed as dist
+from torch import tensor, nn, cat, stack, arange, logspace
 import torch.nn.functional as F
 from torch.nn import Conv1d, Linear, Sequential, Module, ModuleList, LayerNorm, RMSNorm, ModuleDict
 
@@ -51,15 +52,45 @@ def symmetrize(t):
     return add('b i j ..., b j i ... -> b i j ...', t, t) * 0.5
 
 def append_dims(t, ndims):
-    return t.shape(*t.shape, *((1,) * ndims))
+    return t.reshape(*t.shape, *((1,) * ndims))
 
 # batch rmsnorm
+
+def is_distributed():
+    return dist.is_initialized() and dist.get_world_size() > 1
+
+def get_maybe_dist_var(
+    t,
+    distributed = False
+):
+    t = rearrange(t, '... d -> (...) d')
+
+    calc_distributed_var = distributed and is_distributed()
+
+    if not calc_distributed_var:
+        return t.var(dim = 0)
+
+    device = t.device
+    numel = tensor(t[..., 0].numel(), device = device)
+    dist.all_reduce(numel)
+
+    summed = stats.sum(dim = 0)
+    dist.all_reduce(summed)
+
+    mean = summed / numel
+    centered = (t - mean)
+
+    centered_squared_sum = centered.square().sum(dim = 0)
+    dist.all_reduce(centered_squared_sum)
+
+    return centered_squared_sum / (numel - 1) # with correction
 
 class BatchRMSNorm(Module):
     def __init__(
         self,
         dim_feat,
         channel_first = False,
+        distributed = True,
         momentum = 0.9,
         eps = 1e-5,
     ):
@@ -68,8 +99,11 @@ class BatchRMSNorm(Module):
 
         self.eps = eps
         self.momentum = 1. - momentum
-        self.gamma = nn.Parameter(torch.zeros(dim_feat))
         self.channel_first = channel_first
+        self.distributed = distributed
+
+        self.gamma = nn.Parameter(torch.zeros(dim_feat))
+        self.beta = nn.Parameter(torch.zeros(dim_feat))
 
         self.register_buffer('running_var', torch.ones((dim_feat,)))
 
@@ -78,20 +112,34 @@ class BatchRMSNorm(Module):
         x,
         update_running_var = None
     ):
+        gamma, beta, running_var, channel_first = self.gamma, self.beta, self.running_var, self.channel_first
+
         update_running_var = default(update_running_var, self.training)
-        running_var = self.running_var
 
         if update_running_var:
 
-            to_reduce = rearrange(x, 'b d ... -> b ... d') if self.channel_first else x
+            to_reduce = rearrange(x, 'b d ... -> b ... d') if channel_first else x
 
-            batch_var = torch.var(to_reduce, dim = tuple(range(x.ndim - 1)))
+            batch_var = get_maybe_dist_var(to_reduce, distributed = self.distributed)
 
             running_var.lerp_(batch_var, self.momentum)
 
+        # get denominator
+
         std = running_var.clamp(min = self.eps).sqrt()
 
-        return x * self.scale * (self.gamma + 1.) / std
+        # handle channel first
+
+        if channel_first:
+            std, gamma, beta = tuple(append_dims(t, x.ndim - 2) for t in (std, gamma, beta))
+
+        # norm
+
+        batch_rmsnormed = x / std * self.scale
+
+        # scale and offset
+
+        return batch_rmsnormed * (gamma + 1) + beta
 
 # convolutional unet related
 
@@ -121,13 +169,14 @@ class ConvBlock(Module):
 
         conv_klass = Conv1d if width == 1 else WeightStandardConv
 
-        self.conv = conv_klass(dim, dim_out, width, padding = width // 2)
+        self.net = nn.Sequential(
+            BatchRMSNorm(dim, channel_first = True),
+            nn.GELU(),
+            conv_klass(dim, dim_out, width, padding = width // 2)
+        )
 
     def forward(self, x):
-
-        x = F.gelu(x)
-        out = self.conv(x)
-        return out
+        return self.net(x)
 
 class DownresBlock(Module):
     def __init__(
@@ -265,14 +314,17 @@ class NormWrapper(Module):
         dim,
         block: Module,
         dropout = 0.,
-        sandwich = False
+        sandwich = False,
+        use_batch_rmsnorm = True
     ):
         super().__init__()
+        norm_klass = BatchRMSNorm if use_batch_rmsnorm else RMSNorm
+
         self.block = block
-        self.pre_rmsnorm = RMSNorm(dim) # they use an interesting variant of batchnorm, batch-rmsnorm. craft later and make sure it works distributed
+        self.pre_rmsnorm = norm_klass(dim)
 
         self.post_block_dropout = nn.Dropout(dropout)
-        self.post_rmsnorm = RMSNorm(dim) if sandwich else nn.Identity()
+        self.post_rmsnorm = norm_klass(dim) if sandwich else nn.Identity()
 
     def forward(
         self,
@@ -558,9 +610,9 @@ class TransformerTower(Module):
                 pairwise_attn = PairwiseRowAttention(dim_pairwise)
                 pairwise_ff = FeedForward(dim = dim_pairwise, expansion_factor = ff_expansion_factor)
 
-                single_to_pairwise = NormWrapper(dim = dim, block = single_to_pairwise, dropout = dropout)
-                pairwise_attn = NormWrapper(dim = dim_pairwise, block = pairwise_attn, dropout = dropout)
-                pairwise_ff = NormWrapper(dim = dim_pairwise, block = pairwise_ff, dropout = dropout)
+                single_to_pairwise = NormWrapper(dim = dim, block = single_to_pairwise, dropout = dropout, use_batch_rmsnorm = False)
+                pairwise_attn = NormWrapper(dim = dim_pairwise, block = pairwise_attn, dropout = dropout, use_batch_rmsnorm = False)
+                pairwise_ff = NormWrapper(dim = dim_pairwise, block = pairwise_ff, dropout = dropout, use_batch_rmsnorm = False)
 
             # add to layers
 
