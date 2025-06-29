@@ -47,6 +47,9 @@ def default(v, d):
 def softclamp(t, value = 5.):
     return (t / value).tanh() * value
 
+def symmetrize(t):
+    return add('b i j ..., b j i ... -> b i j ...', t, t) * 0.5
+
 def append_dims(t, ndims):
     return t.shape(*t.shape, *((1,) * ndims))
 
@@ -633,103 +636,160 @@ class DNAEmbed(Module):
 
         return pooled, x
 
-class OrganismEmbedding(nn.Module):
-    def __init__(self, dim, num_organisms):
+class OrganismEmbedding(Module):
+    def __init__(
+        self,
+        dim,
+        num_organisms
+    ):
         super().__init__()
         self.embed = nn.Embedding(num_organisms, dim)
-    def forward(self, x, organism_index):
-        emb = self.embed(organism_index).unsqueeze(1)
-        return x + emb
 
-class OutputEmbedding(nn.Module):
-    def __init__(self, input_dim, num_organisms=2, skip_dim=None):
+    def forward(
+        self,
+        x,
+        organism_index
+    ):
+        organism_embed = self.embed(organism_index)
+        return add('b n d, b d', x, organism_embed)
+
+class OutputEmbedding(Module):
+    def __init__(
+        self,
+        input_dim,
+        num_organisms = 2,
+        skip_dim = None
+    ):
         super().__init__()
-        self.double_features = nn.Linear(input_dim, 2 * input_dim)
-        self.skip_proj = (
-            nn.Linear(skip_dim, 2 * input_dim, bias=False) if skip_dim is not None else None
-        )
+        self.double_features = Linear(input_dim, 2 * input_dim)
+        self.skip_proj = LinearNoBias(skip_dim, 2 * input_dim) if exists(skip_dim) else None
         self.norm = BatchRMSNorm(2 * input_dim)
         self.embed = nn.Embedding(num_organisms, 2 * input_dim)
         self.activation = nn.GELU()
 
-    def forward(self, x, organism_index, skip_x=None):
+    def forward(
+        self,
+        x,
+        organism_index,
+        skip_x = None
+    ):
+        seq_len = x.shape[1]
         x = self.double_features(x)  # double the input features
 
-        if skip_x is not None and self.skip_proj is not None:
+        if exists(skip_x) and exists(self.skip_proj):
             skip = self.skip_proj(skip_x)
-            repeat_factor = x.shape[1] // skip.shape[1]
-            skip = skip.repeat_interleave(repeat_factor, dim=1)
+            assert divisible_by(seq_len, skip.shape[1])
+
+            repeat_factor = seq_len // skip.shape[1]
+            skip = repeat(skip, 'b n d -> b (n repeat) d', repeat = repeat_factor)
+
             x = x + skip
 
-        emb = self.embed(organism_index).unsqueeze(1) 
-        x = self.norm(x) + emb
+        emb = self.embed(organism_index)
+
+        x = add('b n d, b d', self.norm(x), emb)
+
         return self.activation(x)
 
-class OutputPairEmbedding(nn.Module):
-    def __init__(self, pair_dim=128, num_organisms=2):
+class OutputPairEmbedding(Module):
+    def __init__(
+        self,
+        pair_dim = 128,
+        num_organisms = 2
+    ):
         super().__init__()
         self.norm = RMSNorm(pair_dim)
         self.embed = nn.Embedding(num_organisms, pair_dim)
         self.activation = nn.GELU()
 
-    def forward(self, x, organism_index):
-        # x: (B, N, N, D)
-        x = (x + x.transpose(1, 2)) / 2.0  # symmetrize
-        emb = self.embed(organism_index).view(-1, 1, 1, x.size(-1))  # (B, 1, 1, D)
-        x = self.norm(x) + emb
+    def forward(
+        self,
+        x,  # Float["b n n d"]
+        organism_index
+    ):
+        x = symmetrize(x)
+
+        organism_embed = self.embed(organism_index)
+        embed = add('b i j d, b d', x, organism_embed)
+
+        x = self.norm(x) + embed
         return self.activation(x)
 
 # output heads
 
-class SimpleOutputHead(nn.Module):
-    def __init__(self, input_dim, out_dim):
+class SimpleOutputHead(Module):
+    def __init__(
+        self,
+        input_dim,
+        out_dim
+    ):
         super().__init__()
-        self.linear = nn.Linear(input_dim, out_dim)
+        self.linear = Linear(input_dim, out_dim)
         self.scale = nn.Parameter(torch.zeros(out_dim))
+
     def forward(self, x):
         x = self.linear(x)
         return F.softplus(x) * F.softplus(self.scale)
         
-class ContactMapHead(nn.Module):
-    def __init__(self, input_dim, out_dim, num_organisms):
+class ContactMapHead(Module):
+    def __init__(
+        self,
+        input_dim,
+        out_dim,
+        num_organisms
+    ):
         super().__init__()
         self.norm = RMSNorm(input_dim)
         self.embed = nn.Embedding(num_organisms, input_dim)
         self.gelu = nn.GELU()
-        self.proj = nn.Linear(input_dim, out_dim)
+        self.proj = Linear(input_dim, out_dim)
         
     def forward(self, x, organism_index):
-        x = (x + x.transpose(1, 2)) / 2.0  # symmetrize
-        x = self.norm(x) + self.embed(organism_index).unsqueeze(1).unsqueeze(1)
+        x = symmetrize(x)
+        x = self.norm(x)
+
+        organism_embed = self.embed(organism_index)
+        x = add('b i j d, b d', x, organism_embed)
+
         x = self.gelu(x)
         return self.proj(x)
 
-class SpliceSiteClassifier(nn.Module):
+class SpliceSiteClassifier(Module):
     def __init__(self, input_dim):
         super().__init__()
-        self.linear = nn.Linear(input_dim, 5)  # Donor+, Acceptor+, Donor-, Acceptor-, None
-    def forward(self, x):
-        return F.softmax(self.linear(x), dim=-1)
 
-class SpliceSiteUsage(nn.Module):
+        self.linear = Linear(input_dim, 5)  # Donor+, Acceptor+, Donor-, Acceptor-, None
+
+    def forward(self, x):
+        return self.linear(x).softmax(dim = -1)
+
+class SpliceSiteUsage(Module):
     def __init__(self, input_dim, n_contexts):
         super().__init__()
-        self.linear = nn.Linear(input_dim, n_contexts)
-    def forward(self, x):
-        return torch.sigmoid(self.linear(x))
+        self.linear = Linear(input_dim, n_contexts)
 
-class SpliceJunctionHead(nn.Module):
-    def __init__(self, input_dim, hidden_dim, n_contexts):
+    def forward(self, x):
+        return self.linear(x).sigmoid()
+
+class SpliceJunctionHead(Module):
+    def __init__(
+        self,
+        input_dim,
+        hidden_dim,
+        n_contexts
+    ):
         super().__init__()
-        self.project = nn.Linear(input_dim, hidden_dim)
+        self.project = Linear(input_dim, hidden_dim)
         self.scale = nn.Parameter(torch.ones(n_contexts, hidden_dim))
         self.offset = nn.Parameter(torch.zeros(n_contexts, hidden_dim))
         self.rope = RotaryEmbedding(hidden_dim)
         self.n_contexts = n_contexts
 
-    def tissue_scaled_rope(self, x, indices):
-        # x: [B, N, H]
-        # indices: [B, P]
+    def tissue_scaled_rope(
+        self,
+        x, # Float['b n h']
+        indices # Int['b p']
+    ):
     
         B, N, H = x.shape
         T = self.n_contexts
@@ -738,28 +798,24 @@ class SpliceJunctionHead(nn.Module):
         # index and rescale
         
         x = x[torch.arange(B).unsqueeze(1), indices]  # [B, P, H]
-        x = (
-            x.unsqueeze(2) * 
-            self.scale.unsqueeze(0).unsqueeze(0) + 
-            self.offset.unsqueeze(0).unsqueeze(0) 
-        ) # [B, P, T, H]
+
+        x = multiply('b p h, t h, t h -> b p t h', x, self.scale, self.offset)
     
         # get rotary embeddings [T, H]
         
-        rotary_emb = self.rope(T).to(x.device)  # [T, H]
-        rotary_emb = rotary_emb.unsqueeze(0).unsqueeze(0)  # [1, 1, T, H]
+        rotary_emb = self.rope(T)
     
         # apply
         
         x = apply_rotary_pos_emb(rotary_emb, x)
-        
+
         return x
 
     def forward(self, x, donor_idx, acceptor_idx):
         x_proj = self.project(x)
         donor_embed = self.tissue_scaled_rope(x_proj, donor_idx)
         acceptor_embed = self.tissue_scaled_rope(x_proj, acceptor_idx)
-        scores = torch.einsum('bdth,bath->bdat', donor_embed, acceptor_embed)
+        scores = einsum(donor_embed, acceptor_embed, 'b d t h, b a t h -> b d a t')
         return F.softplus(scores)
         
 # classes
@@ -816,7 +872,6 @@ class AlphaGenome(Module):
 
             ups.insert(0, up)
 
-
         self.downs = ModuleList(downs)
         self.ups = ModuleList(ups)
 
@@ -825,13 +880,16 @@ class AlphaGenome(Module):
             **transformer_kwargs
         )
 
+        # head related
+
         self.organism_embed = OrganismEmbedding(last_dim, num_organisms)
 
         self.outembed_128bp = OutputEmbedding(last_dim, num_organisms)
         self.outembed_1bp = OutputEmbedding(first_dim, num_organisms, skip_dim=2*last_dim)
         self.outembed_pair = OutputPairEmbedding(2**len(dims), num_organisms)
 
-        self.heads = {}
+        self.heads = ModuleDict()
+
         for organism, kwargs in outheads_kwargs.items():
             self.heads[organism] = self.add_heads(
                 num_organisms = num_organisms, 
@@ -918,13 +976,20 @@ class AlphaGenome(Module):
 
         return embeddings_1bp, embeddings_128bp, embeddings_pair
     
-    def forward(self, seq, organism_index, splice_donor_idx, splice_acceptor_idx):
+    def forward(
+        self,
+        seq,
+        organism_index,
+        splice_donor_idx,
+        splice_acceptor_idx
+    ):
 
         # process sequence
         
         embeddings_1bp, embeddings_128bp, embeddings_pair = self.get_embeddings(seq, organism_index)
 
         # get output tracks
+
         out = {}
         for organism, heads in self.heads.items():
             out[organism] = {
@@ -937,9 +1002,3 @@ class AlphaGenome(Module):
             }
         
         return out
-
-
-
-
-        
-        
