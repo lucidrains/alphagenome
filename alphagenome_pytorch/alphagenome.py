@@ -1,9 +1,11 @@
 from __future__ import annotations
+
+import inspect
 from functools import partial
 
 import torch
 import torch.distributed as dist
-from torch import tensor, nn, cat, stack, arange, logspace
+from torch import tensor, arange, nn, cat, stack, arange, logspace
 import torch.nn.functional as F
 from torch.nn import Conv1d, Linear, Sequential, Module, ModuleList, LayerNorm, RMSNorm, ModuleDict
 
@@ -767,6 +769,16 @@ class OutputPairEmbedding(Module):
         x = self.norm(x) + embed
         return self.activation(x)
 
+# some reflection to make adding prediction heads easy
+
+def get_function_arg_names(fn):
+    signature = inspect.signature(fn)
+    parameters = signature.parameters.values()
+    return [p.name for p in parameters]
+
+def is_disjoint(a: set, b: set):
+    return not any(a.intersection(b))
+
 # output heads
 
 class SimpleOutputHead(Module):
@@ -782,7 +794,17 @@ class SimpleOutputHead(Module):
     def forward(self, x):
         x = self.linear(x)
         return F.softplus(x) * F.softplus(self.scale)
-        
+
+# 1bp and 128bp share the same SimpleOutputHead but with different arg names to route the right embedding
+
+class SimpleOutputHead1bp(SimpleOutputHead):
+    def forward(self, embeds_1bp):
+        return super().forward(embeds_1bp)
+
+class SimpleOutputHead128bp(SimpleOutputHead):
+    def forward(self, embeds_128bp):
+        return super().forward(embeds_128bp)
+
 class ContactMapHead(Module):
     def __init__(
         self,
@@ -796,8 +818,13 @@ class ContactMapHead(Module):
         self.gelu = nn.GELU()
         self.proj = Linear(input_dim, out_dim)
         
-    def forward(self, x, organism_index):
-        x = symmetrize(x)
+    def forward(
+        self,
+        embeds_pair,
+        organism_index
+    ):
+
+        x = symmetrize(embeds_pair)
         x = self.norm(x)
 
         organism_embed = self.embed(organism_index)
@@ -809,19 +836,24 @@ class ContactMapHead(Module):
 class SpliceSiteClassifier(Module):
     def __init__(self, input_dim):
         super().__init__()
-
         self.linear = Linear(input_dim, 5)  # Donor+, Acceptor+, Donor-, Acceptor-, None
 
-    def forward(self, x):
-        return self.linear(x).softmax(dim = -1)
+    def forward(
+        self,
+        embeds_1bp
+    ):
+        return self.linear(embeds_1bp).softmax(dim = -1)
 
 class SpliceSiteUsage(Module):
     def __init__(self, input_dim, n_contexts):
         super().__init__()
         self.linear = Linear(input_dim, n_contexts)
 
-    def forward(self, x):
-        return self.linear(x).sigmoid()
+    def forward(
+        self,
+        embeds_1bp
+    ):
+        return self.linear(embeds_1bp).sigmoid()
 
 class SpliceJunctionHead(Module):
     def __init__(
@@ -839,23 +871,24 @@ class SpliceJunctionHead(Module):
 
     def tissue_scaled_rope(
         self,
-        x, # Float['b n h']
+        embeds_1bp, # Float['b n h']
         indices # Int['b p']
     ):
     
-        B, N, H = x.shape
-        T = self.n_contexts
-        P = indices.shape[1]
+        batch, device = embeds_1bp.shape[0], embeds_1bp.device
+        n_contexts = self.n_contexts
     
         # index and rescale
         
-        x = x[torch.arange(B).unsqueeze(1), indices]  # [B, P, H]
+        batch_indices = rearrange(arange(batch, device = device), 'b -> b 1')
+
+        x = embeds_1bp[batch_indices, indices]  # [B, P, H]
 
         x = multiply('b p h, t h, t h -> b p t h', x, self.scale, self.offset)
     
         # get rotary embeddings [T, H]
         
-        rotary_emb = self.rope(T)
+        rotary_emb = self.rope(n_contexts)
     
         # apply
         
@@ -863,10 +896,15 @@ class SpliceJunctionHead(Module):
 
         return x
 
-    def forward(self, x, donor_idx, acceptor_idx):
-        x_proj = self.project(x)
-        donor_embed = self.tissue_scaled_rope(x_proj, donor_idx)
-        acceptor_embed = self.tissue_scaled_rope(x_proj, acceptor_idx)
+    def forward(
+        self,
+        embeds_1bp,
+        splice_donor_idx,
+        splice_acceptor_idx
+    ):
+        x_proj = self.project(embeds_1bp)
+        donor_embed = self.tissue_scaled_rope(x_proj, splice_donor_idx)
+        acceptor_embed = self.tissue_scaled_rope(x_proj, splice_acceptor_idx)
         scores = einsum(donor_embed, acceptor_embed, 'b d t h, b a t h -> b d a t')
         return F.softplus(scores)
         
@@ -932,7 +970,7 @@ class AlphaGenome(Module):
             **transformer_kwargs
         )
 
-        # head related
+        # organism embed and output embed
 
         self.organism_embed = OrganismEmbedding(last_dim, num_organisms)
 
@@ -940,18 +978,24 @@ class AlphaGenome(Module):
         self.outembed_1bp = OutputEmbedding(first_dim, num_organisms, skip_dim=2*last_dim)
         self.outembed_pair = OutputPairEmbedding(2**len(dims), num_organisms)
 
+        # head related
+
         self.heads = ModuleDict()
+        self.head_forward_arg_names = dict()
 
         for organism, kwargs in outheads_kwargs.items():
-            self.heads[organism] = self.add_heads(
+            heads = self.add_splice_heads(
                 num_organisms = num_organisms, 
                 dim_1bp = last_dim,
-                dim_128bp = 2*last_dim, 
-                dim_contacts = 2**len(dims),
+                dim_128bp = 2 * last_dim, 
+                dim_contacts = 2 ** len(dims),
                 **kwargs
             )
 
-    def add_heads(
+            self.head_forward_arg_names[organism] = {head_name: get_function_arg_names(head.forward) for head_name, head in heads.items()}
+            self.heads[organism] = heads
+
+    def add_splice_heads(
         self, 
         num_organisms,
         dim_1bp,
@@ -960,14 +1004,15 @@ class AlphaGenome(Module):
         num_tracks_1bp,
         num_tracks_128bp,
         num_splicing_contexts,
-        hidden_dim_splice_juncs=512
+        hidden_dim_splice_juncs = 512
     ):
         heads = ModuleDict({
+
             # RNA-seq, CAGE, ATAC, DNAse and PRO-Cap
-            "1bp_tracks": SimpleOutputHead(dim_1bp, num_tracks_1bp),
+            "1bp_tracks": SimpleOutputHead1bp(dim_1bp, num_tracks_1bp),
             
             # TF ChIP-seq and Histone ChIP-seq
-            "128bp_tracks": SimpleOutputHead(dim_128bp, num_tracks_128bp),
+            "128bp_tracks": SimpleOutputHead128bp(dim_128bp, num_tracks_128bp),
 
             # Contact Maps
             "contact_head": ContactMapHead(dim_contacts, dim_contacts, num_organisms),
@@ -980,7 +1025,7 @@ class AlphaGenome(Module):
 
         return heads
         
-    def get_embeddings(
+    def get_embeds(
         self,
         seq, # Int['b n']
         organism_index
@@ -1022,35 +1067,66 @@ class AlphaGenome(Module):
 
         # embed organism to outputs
 
-        embeddings_128bp = self.outembed_128bp(single, organism_index)
-        embeddings_1bp = self.outembed_1bp(pred, organism_index, embeddings_128bp)
-        embeddings_pair = self.outembed_pair(pairwise, organism_index)
+        embeds_128bp = self.outembed_128bp(single, organism_index)
+        embeds_1bp = self.outembed_1bp(pred, organism_index, embeds_128bp)
+        embeds_pair = self.outembed_pair(pairwise, organism_index)
 
-        return embeddings_1bp, embeddings_128bp, embeddings_pair
+        return embeds_1bp, embeds_128bp, embeds_pair
     
     def forward(
         self,
         seq,
         organism_index,
-        splice_donor_idx,
-        splice_acceptor_idx
+        return_embeds = False,
+        **head_kwargs
     ):
 
         # process sequence
         
-        embeddings_1bp, embeddings_128bp, embeddings_pair = self.get_embeddings(seq, organism_index)
+        embeds = self.get_embeds(seq, organism_index)
+
+        # early return embeds, if specified
+
+        if return_embeds or len(self.heads) == 0:
+            return embeds
 
         # get output tracks
 
-        out = {}
+        embeds_1bp, embeds_128bp, embeds_pair = embeds
+
+        head_inputs = dict(
+            embeds_1bp = embeds_1bp,
+            embeds_128bp = embeds_128bp,
+            embeds_pair = embeds_pair,
+            organism_index = organism_index,
+        )
+
+        assert is_disjoint(set(head_inputs.keys()), set(head_kwargs.keys()))
+
+        head_inputs.update(**head_kwargs)
+
+        out = dict()
+
         for organism, heads in self.heads.items():
-            out[organism] = {
-                "1bp_tracks": heads["1bp_tracks"](embeddings_1bp),
-                "128bp_tracks": heads["128bp_tracks"](embeddings_128bp),
-                "contact_head": heads["contact_head"](embeddings_pair, organism_index),
-                "splice_probs": heads["splice_probs"](embeddings_1bp),
-                "splice_usage": heads["splice_usage"](embeddings_1bp),
-                "splice_juncs": heads["splice_juncs"](embeddings_1bp, splice_donor_idx, splice_acceptor_idx)
-            }
+
+            organism_head_args = self.head_forward_arg_names[organism]
+
+            organism_out = dict()
+
+            for head_name, head in heads.items():
+
+                # get the inputs needed for the head, which is determined by the arg / kwarg name on the forward
+
+                head_args = organism_head_args[head_name]
+
+                head_kwargs = {head_arg: head_inputs[head_arg] for head_arg in head_args}
+
+                # forward gathered inputs through the specific head
+
+                head_out = head(**head_kwargs)
+
+                organism_out[head_name] = head_out
+
+            out[organism] = organism_out
         
         return out

@@ -30,9 +30,9 @@ def test_alphagenome():
     dna = torch.randint(0, 5, (2, 8192))
     organism_index = torch.tensor([0, 0], dtype=torch.long)
 
-    pred_nucleotide_logits, single, pairwise = model.get_embeddings(dna, organism_index)
+    embeds_1bp, embeds_128bp, embeds_pair = model(dna, organism_index)
 
-    pred = pred_nucleotide_logits.argmax(dim = -1)
+    pred = embeds_1bp.argmax(dim = -1)
 
     assert pred.shape[1] == dna.shape[1]
 
@@ -55,22 +55,24 @@ def test_splicing_heads():
             "num_splicing_contexts": 64, # 2 strands x num. CURIE conditions
         }
     }
+
     model = AlphaGenome(outheads_kwargs=outheads_kwargs)
 
     dna = torch.randint(0, 5, (2, 8192))
 
     organism_index = torch.tensor([0, 0]) # the organism that each sequence belongs to
-    splice_donor_idx = torch.tensor([[10,100,34],[24,546,870]])
-    splice_acceptor_idx = torch.tensor([[15,103,87],[56,653,900]])
+    splice_donor_idx = torch.tensor([[10,100,34], [24,546,870]])
+    splice_acceptor_idx = torch.tensor([[15,103,87], [56,653,900]])
 
     # get sequence embeddings
 
-    embeddings_1bp, embeddings_128bp, embeddings_pair = model.get_embeddings(dna, organism_index) # (2, 8192, 1536), (2, 64, 3072), (2, 4, 4, 128)
+    embeddings_1bp, embeddings_128bp, embeddings_pair = model(dna, organism_index, return_embeds = True) # (2, 8192, 1536), (2, 64, 3072), (2, 4, 4, 128)
     print(embeddings_1bp.shape, embeddings_128bp.shape, embeddings_pair.shape)
 
     # get track predictions
 
-    out = model(dna, organism_index, splice_donor_idx, splice_acceptor_idx)
+    out = model(dna, organism_index, splice_donor_idx = splice_donor_idx, splice_acceptor_idx = splice_acceptor_idx)
+
     for organism, outputs in out.items():
         for out_head, out_values in outputs.items():
             print(organism, out_head, out_values.shape)
