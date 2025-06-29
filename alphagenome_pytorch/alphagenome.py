@@ -724,13 +724,36 @@ class SpliceJunctionHead(nn.Module):
         self.project = nn.Linear(input_dim, hidden_dim)
         self.scale = nn.Parameter(torch.ones(n_contexts, hidden_dim))
         self.offset = nn.Parameter(torch.zeros(n_contexts, hidden_dim))
+        self.rope = RotaryEmbedding(hidden_dim)
         self.n_contexts = n_contexts
 
     def tissue_scaled_rope(self, x, indices):
-        x = x[torch.arange(x.size(0)).unsqueeze(1), indices]  # B, P, H
-        x = x.unsqueeze(2) * self.scale.unsqueeze(0).unsqueeze(0) + self.offset.unsqueeze(0).unsqueeze(0)
-        x = apply_rotary_pos_emb(indices, x)
-        return x  # B, P, T, H
+        # x: [B, N, H]
+        # indices: [B, P]
+    
+        B, N, H = x.shape
+        T = self.n_contexts
+        P = indices.shape[1]
+    
+        # index and rescale
+        
+        x = x[torch.arange(B).unsqueeze(1), indices]  # [B, P, H]
+        x = (
+            x.unsqueeze(2) * 
+            self.scale.unsqueeze(0).unsqueeze(0) + 
+            self.offset.unsqueeze(0).unsqueeze(0) 
+        ) # [B, P, T, H]
+    
+        # get rotary embeddings [T, H]
+        
+        rotary_emb = self.rope(T).to(x.device)  # [T, H]
+        rotary_emb = rotary_emb.unsqueeze(0).unsqueeze(0)  # [1, 1, T, H]
+    
+        # apply
+        
+        x = apply_rotary_pos_emb(rotary_emb, x)
+        
+        return x
 
     def forward(self, x, donor_idx, acceptor_idx):
         x_proj = self.project(x)
@@ -814,7 +837,7 @@ class AlphaGenome(Module):
                 num_organisms = num_organisms, 
                 dim_1bp = last_dim,
                 dim_128bp = 2*last_dim, 
-                dim_contacts = 2**len(dims), 
+                dim_contacts = 2**len(dims),
                 **kwargs
             )
 
@@ -910,7 +933,7 @@ class AlphaGenome(Module):
                 "contact_head": heads["contact_head"](embeddings_pair, organism_index),
                 "splice_probs": heads["splice_probs"](embeddings_1bp),
                 "splice_usage": heads["splice_usage"](embeddings_1bp),
-                #"splice_juncs": heads["splice_juncs"](embeddings_1bp, splice_donor_idx, splice_acceptor_idx)
+                "splice_juncs": heads["splice_juncs"](embeddings_1bp, splice_donor_idx, splice_acceptor_idx)
             }
         
         return out

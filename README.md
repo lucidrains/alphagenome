@@ -25,7 +25,7 @@ outheads_kwargs = {
     "human": {
         "num_tracks_1bp": 10,
         "num_tracks_128bp": 10,
-        "num_splicing_contexts": 10,
+        "num_splicing_contexts": 64, # 2 strands x num. CURIE conditions
     }
 }
 model = AlphaGenome(outheads_kwargs=outheads_kwargs)
@@ -49,7 +49,8 @@ for organism, outputs in out.items():
 # human 128bp_tracks torch.Size([2, 64, 10])
 # human contact_head torch.Size([2, 4, 4, 128])
 # human splice_probs torch.Size([2, 8192, 5])
-# human splice_usage torch.Size([2, 8192, 10])
+# human splice_usage torch.Size([2, 8192, 64])
+# human splice_juncs torch.Size([2, 3, 3, 64])
 ```
 
 ## Contributing
