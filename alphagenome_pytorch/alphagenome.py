@@ -28,6 +28,12 @@ from einops import rearrange, repeat, einsum
 
 LinearNoBias = partial(Linear, bias = False)
 
+TransformerUnetOutput = namedtuple('TransformerUnetOutput', [
+    'output',
+    'single_repr',
+    'pairwise_repr'
+])
+
 Embeds = namedtuple('Embeds', [
     'embeds_1bp',
     'embeds_128bp',
@@ -815,7 +821,7 @@ class TransformerUnet(Module):
             
         out = rearrange(x, 'b d n -> b n d') # 1D 1bp resolution
 
-        return out, single, pairwise # the final output, as well as single and pairwise repr from the transformer
+        return TransformerUnetOutput(out, single, pairwise) # the final output, as well as single and pairwise repr from the transformer
 
 # embedding
 
