@@ -6,6 +6,7 @@ from alphagenome_pytorch.alphagenome import (
     RotaryEmbedding,
     FeedForward,
     TransformerTower,
+    TransformerUnet,
     UpresBlock,
     DownresBlock,
     BatchRMSNorm

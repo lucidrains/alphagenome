@@ -667,6 +667,110 @@ class TransformerTower(Module):
 
         return single, pairwise
 
+# transformer unet
+
+class TransformerUnet(Module):
+    def __init__(
+        self,
+        dims: tuple[int, ...] = (
+            768,
+            896,
+            1024,
+            1152,
+            1280,
+            1408,
+            1536
+        ),
+        basepairs = 5,
+        dna_embed_width = 15,
+        transformer_kwargs: dict = dict()
+    ):
+        super().__init__()
+
+        assert is_odd(dna_embed_width)
+
+        assert len(dims) >= 2
+        first_dim, *_, last_dim = dims
+
+        self.dna_embed = DNAEmbed(first_dim, dim_input = basepairs, width = dna_embed_width)
+
+        dim_with_input = (basepairs, *dims)
+        dim_pairs = zip(dim_with_input[:-1], dim_with_input[1:])
+
+        downs = []
+        ups = []
+
+        for layer_num, (dim_in, dim_out) in enumerate(dim_pairs, start = 1):
+            is_first = layer_num == 1
+
+            channel_diff = dim_out - dim_in
+
+            assert channel_diff > 0
+
+            if not is_first:
+                down = DownresBlock(dim_in, channels_to_add = channel_diff)
+                downs.append(down)
+
+            up = UpresBlock(
+                dim_out,
+                channels_to_remove = channel_diff if not is_first else 0,
+                has_skip = not is_first
+            )
+
+            ups.insert(0, up)
+
+        self.downs = ModuleList(downs)
+        self.ups = ModuleList(ups)
+
+        self.transformer = TransformerTower(
+            dim = last_dim,
+            **transformer_kwargs
+        )
+
+    def forward(
+        self,
+        seq,
+        pre_attend_embed = None
+    ):
+        skips = []
+
+        # embed with one hot and add skip
+
+        dna_embed, skip = self.dna_embed(seq)
+
+        # downs
+
+        x = dna_embed
+
+        for down in self.downs:
+            skips.append(x)
+            x = down(x)
+
+        x = rearrange(x, 'b d n -> b n d')
+
+        # embed organism
+
+        if exists(pre_attend_embed):
+            x = add('b n d, b d', x, pre_attend_embed)
+
+        # attention
+        
+        single, pairwise = self.transformer(x) # 1D 128bp resolution, 2D contact pairs
+        
+        # ups with skips from down
+        
+        x = rearrange(single, 'b n d -> b d n')
+
+        for i, up in enumerate(self.ups):
+            is_last = i == (len(self.ups) - 1)
+            skip = skips.pop() if not is_last else None
+
+            x = up(x, skip = skip)
+            
+        out = rearrange(x, 'b d n -> b n d') # 1D 1bp resolution
+
+        return out, single, pairwise # the final output, as well as single and pairwise repr from the transformer
+
 # embedding
 
 class DNAEmbed(Module):
@@ -708,11 +812,9 @@ class OrganismEmbedding(Module):
 
     def forward(
         self,
-        x,
         organism_index
     ):
-        organism_embed = self.embed(organism_index)
-        return add('b n d, b d', x, organism_embed)
+        return self.embed(organism_index)
 
 class OutputEmbedding(Module):
     def __init__(
@@ -732,13 +834,13 @@ class OutputEmbedding(Module):
         self,
         x,
         organism_index,
-        skip_x = None
+        skip = None
     ):
         seq_len = x.shape[1]
         x = self.double_features(x)  # double the input features
 
-        if exists(skip_x) and exists(self.skip_proj):
-            skip = self.skip_proj(skip_x)
+        if exists(skip) and exists(self.skip_proj):
+            skip = self.skip_proj(skip)
             assert divisible_by(seq_len, skip.shape[1])
 
             repeat_factor = seq_len // skip.shape[1]
@@ -936,52 +1038,21 @@ class AlphaGenome(Module):
     ):
         super().__init__()
 
-        assert is_odd(dna_embed_width)
-
-        assert len(dims) >= 2
-        first_dim, *_, last_dim = dims
-
-        self.dna_embed = DNAEmbed(first_dim, dim_input = basepairs, width = dna_embed_width)
-
-        dim_with_input = (basepairs, *dims)
-        dim_pairs = zip(dim_with_input[:-1], dim_with_input[1:])
-
-        downs = []
-        ups = []
-
-        for layer_num, (dim_in, dim_out) in enumerate(dim_pairs, start = 1):
-            is_first = layer_num == 1
-
-            channel_diff = dim_out - dim_in
-
-            assert channel_diff > 0
-
-            if not is_first:
-                down = DownresBlock(dim_in, channels_to_add = channel_diff)
-                downs.append(down)
-
-            up = UpresBlock(
-                dim_out,
-                channels_to_remove = channel_diff if not is_first else 0,
-                has_skip = not is_first
-            )
-
-            ups.insert(0, up)
-
-        self.downs = ModuleList(downs)
-        self.ups = ModuleList(ups)
-
-        self.transformer = TransformerTower(
-            dim = last_dim,
-            **transformer_kwargs
+        self.transformer_unet = TransformerUnet(
+            dims = dims,
+            basepairs = basepairs,
+            dna_embed_width = dna_embed_width,
+            transformer_kwargs = transformer_kwargs
         )
 
         # organism embed and output embed
 
+        first_dim, *_, last_dim = dims
+
         self.organism_embed = OrganismEmbedding(last_dim, num_organisms)
 
         self.outembed_128bp = OutputEmbedding(last_dim, num_organisms)
-        self.outembed_1bp = OutputEmbedding(first_dim, num_organisms, skip_dim=2*last_dim)
+        self.outembed_1bp = OutputEmbedding(first_dim, num_organisms, skip_dim = 2*last_dim)
         self.outembed_pair = OutputPairEmbedding(2**len(dims), num_organisms)
 
         # heads
@@ -1048,44 +1119,14 @@ class AlphaGenome(Module):
         organism_index
     ):
 
-        skips = []
+        organism_embed = self.organism_embed(organism_index)
 
-        # embed with one hot and add skip
-
-        dna_embed, skip = self.dna_embed(seq)
-        skips.append(skip)
-
-        # downs
-
-        x = dna_embed
-
-        for down in self.downs:
-            skips.append(x)
-            x = down(x)
-
-        x = rearrange(x, 'b d n -> b n d')
-        
-        # embed organism
-
-        x = self.organism_embed(x, organism_index)
-
-        # attention
-        
-        single, pairwise = self.transformer(x) # 1D 128bp resolution, 2D contact pairs
-        
-        # ups with skips from down
-        
-        x = rearrange(single, 'b n d -> b d n')
-
-        for up in self.ups:
-            x = up(x, skip = skips.pop())
-            
-        pred = rearrange(x, 'b d n -> b n d') # 1D 1bp resolution
+        unet_out, single, pairwise = self.transformer_unet(seq, pre_attend_embed = organism_embed)
 
         # embed organism to outputs
 
         embeds_128bp = self.outembed_128bp(single, organism_index)
-        embeds_1bp = self.outembed_1bp(pred, organism_index, embeds_128bp)
+        embeds_1bp = self.outembed_1bp(unet_out, organism_index, embeds_128bp)
         embeds_pair = self.outembed_pair(pairwise, organism_index)
 
         return Embeds(embeds_1bp, embeds_128bp, embeds_pair)
