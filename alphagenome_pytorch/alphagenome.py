@@ -6,7 +6,7 @@ from collections import namedtuple
 
 import torch
 import torch.distributed as dist
-from torch import tensor, arange, nn, cat, stack, arange, logspace
+from torch import tensor, arange, nn, cat, stack, arange, logspace, Tensor
 import torch.nn.functional as F
 from torch.nn import Conv1d, Linear, Sequential, Module, ModuleList, LayerNorm, RMSNorm, ModuleDict
 
@@ -994,6 +994,24 @@ class AlphaGenome(Module):
         self.heads = ModuleDict()
         self.head_forward_arg_names = dict()
 
+    def add_head(
+        self,
+        organism,
+        head_name,
+        head: Module,
+        head_input_kwarg_names: tuple[str, ...] | None = None
+    ):
+        if organism not in self.heads:
+            self.heads[organism] = ModuleDict()
+            self.head_forward_arg_names[organism] = dict()
+
+        self.heads[organism][head_name] = head
+
+        if not exists(head_input_kwarg_names):
+            head_input_kwarg_names = get_function_arg_names(head.forward)
+
+        self.head_forward_arg_names[organism][head_name] = head_input_kwarg_names
+
     def add_splice_heads(
         self,
         organism,
@@ -1002,27 +1020,27 @@ class AlphaGenome(Module):
         num_splicing_contexts,
         hidden_dim_splice_juncs = 512
     ):
-        # head related
+        # splice head related
 
-        organism_heads = ModuleDict({
+        organism_heads = (
 
             # RNA-seq, CAGE, ATAC, DNAse and PRO-Cap
-            "1bp_tracks": SimpleOutputHead1bp(self.dim_1bp, num_tracks_1bp),
+            ("1bp_tracks", SimpleOutputHead1bp(self.dim_1bp, num_tracks_1bp)),
             
             # TF ChIP-seq and Histone ChIP-seq
-            "128bp_tracks": SimpleOutputHead128bp(self.dim_128bp, num_tracks_128bp),
+            ("128bp_tracks", SimpleOutputHead128bp(self.dim_128bp, num_tracks_128bp)),
 
             # Contact Maps
-            "contact_head": ContactMapHead(self.dim_contacts, self.dim_contacts, self.num_organisms),
+            ("contact_head", ContactMapHead(self.dim_contacts, self.dim_contacts, self.num_organisms)),
 
             # Splicing
-            "splice_probs": SpliceSiteClassifier(self.dim_1bp),
-            "splice_usage": SpliceSiteUsage(self.dim_1bp, num_splicing_contexts),
-            "splice_juncs": SpliceJunctionHead(self.dim_1bp, hidden_dim_splice_juncs, num_splicing_contexts)
-        })
+            ("splice_probs", SpliceSiteClassifier(self.dim_1bp)),
+            ("splice_usage", SpliceSiteUsage(self.dim_1bp, num_splicing_contexts)),
+            ("splice_juncs", SpliceJunctionHead(self.dim_1bp, hidden_dim_splice_juncs, num_splicing_contexts))
+        )
 
-        self.heads[organism] = organism_heads
-        self.head_forward_arg_names[organism] = {head_name: get_function_arg_names(head.forward) for head_name, head in organism_heads.items()}
+        for head_name, head in organism_heads:
+            self.add_head(organism, head_name, head)
 
     def get_embeds(
         self,
@@ -1075,10 +1093,16 @@ class AlphaGenome(Module):
     def forward(
         self,
         seq,
-        organism_index,
+        organism_index: int | Tensor,
         return_embeds = False,
         **head_kwargs
     ):
+
+        # handle int organism_index (0 for human, 1 for mouse)
+
+        if isinstance(organism_index, int):
+            batch = seq.shape[0]
+            organism_index = torch.full((batch,), organism_index, device = seq.device)
 
         # process sequence
         
