@@ -54,8 +54,11 @@ def is_even(num):
 def l2norm(t, dim = -1):
     return F.normalize(t, dim = dim, p = 2)
 
-def default(v, d):
-    return v if exists(v) else d
+def default(*args):
+    for arg in args:
+        if exists(arg):
+            return arg
+    return None
 
 def softclamp(t, value = 5.):
     return (t / value).tanh() * value
@@ -128,7 +131,7 @@ class BatchRMSNorm(Module):
     ):
         gamma, beta, running_var, channel_first = self.gamma, self.beta, self.running_var, self.channel_first
 
-        update_running_var = default(update_running_var, self.training and self.update_running_var)
+        update_running_var = default(update_running_var, self.update_running_var, self.training)
 
         if update_running_var:
 
@@ -154,6 +157,16 @@ class BatchRMSNorm(Module):
         # scale and offset
 
         return batch_rmsnormed * (gamma + 1) + beta
+
+# for easier time freezing the running variance
+
+def set_update_running_var(
+    root: Module,
+    update_running_var
+):
+    for mod in root.modules():
+        if isinstance(mod, BatchRMSNorm):
+            mod.update_running_var = update_running_var
 
 # channel first rmsnorm
 

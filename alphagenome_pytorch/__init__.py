@@ -9,5 +9,6 @@ from alphagenome_pytorch.alphagenome import (
     TransformerUnet,
     UpresBlock,
     DownresBlock,
-    BatchRMSNorm
+    BatchRMSNorm,
+    set_update_running_var
 )
