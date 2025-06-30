@@ -393,7 +393,7 @@ class Attention(Module):
         # to attention bias
 
         self.to_attn_bias = Sequential(
-            RMSNorm(dim_pairwise), # replace with BatchRMSNorm once crafted
+            BatchRMSNorm(dim_pairwise),
             nn.GELU(),
             LinearNoBias(dim_pairwise, heads),
             Rearrange('b i j (g h) -> b g h i j', g = groups)
