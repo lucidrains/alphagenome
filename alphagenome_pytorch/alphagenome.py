@@ -8,7 +8,7 @@ import torch
 import torch.distributed as dist
 from torch import tensor, arange, nn, cat, stack, arange, logspace, Tensor
 import torch.nn.functional as F
-from torch.nn import Conv1d, Linear, Sequential, Module, ModuleList, LayerNorm, RMSNorm, ModuleDict
+from torch.nn import Conv1d, Linear, Sequential, Module, ModuleList, LayerNorm, ModuleDict
 
 from torch.nn.utils.parametrize import register_parametrization
 
@@ -50,6 +50,9 @@ def is_odd(num):
 
 def is_even(num):
     return divisible_by(num, 2)
+
+def l2norm(t, dim = -1):
+    return F.normalize(t, dim = dim, p = 2)
 
 def default(v, d):
     return v if exists(v) else d
@@ -102,6 +105,7 @@ class BatchRMSNorm(Module):
         distributed = True,
         momentum = 0.9,
         eps = 1e-5,
+        update_running_var = True
     ):
         super().__init__()
         self.scale = dim_feat ** 0.5
@@ -114,6 +118,7 @@ class BatchRMSNorm(Module):
         self.gamma = nn.Parameter(torch.zeros(dim_feat))
         self.beta = nn.Parameter(torch.zeros(dim_feat))
 
+        self.update_running_var = update_running_var
         self.register_buffer('running_var', torch.ones((dim_feat,)))
 
     def forward(
@@ -123,7 +128,7 @@ class BatchRMSNorm(Module):
     ):
         gamma, beta, running_var, channel_first = self.gamma, self.beta, self.running_var, self.channel_first
 
-        update_running_var = default(update_running_var, self.training)
+        update_running_var = default(update_running_var, self.training and self.update_running_var)
 
         if update_running_var:
 
@@ -150,6 +155,32 @@ class BatchRMSNorm(Module):
 
         return batch_rmsnormed * (gamma + 1) + beta
 
+# channel first rmsnorm
+
+class ChannelFirstRMSNorm(Module):
+    def __init__(
+        self,
+        dim
+    ):
+        super().__init__()
+        self.scale = dim ** 0.5
+        self.gamma = nn.Parameter(torch.zeros(dim))
+
+    def forward(self, x):
+        gamma = append_dims(self.gamma, x.ndim - 2)
+        return l2norm(x, dim = 1) * self.scale * (gamma + 1)
+
+# function for determining which rmsnorm
+
+def RMSNorm(dim, channel_first = False, batch = False):
+
+    if not batch and not channel_first:
+        return nn.RMSNorm(dim)
+    elif not batch and channel_first:
+        return ChannelFirstRMSNorm(dim)
+    else:
+        return BatchRMSNorm(dim, channel_first = channel_first)
+
 # convolutional unet related
 
 class WeightStandardConv(Conv1d):
@@ -170,7 +201,8 @@ class ConvBlock(Module):
         self,
         dim,
         width = 5,
-        dim_out = None
+        dim_out = None,
+        batch_rmsnorm = True
     ):
         super().__init__()
         assert is_odd(width)
@@ -179,7 +211,7 @@ class ConvBlock(Module):
         conv_klass = Conv1d if width == 1 else WeightStandardConv
 
         self.net = nn.Sequential(
-            BatchRMSNorm(dim, channel_first = True),
+            RMSNorm(dim, channel_first = True, batch = batch_rmsnorm),
             nn.GELU(),
             conv_klass(dim, dim_out, width, padding = width // 2)
         )
@@ -327,7 +359,7 @@ class NormWrapper(Module):
         use_batch_rmsnorm = True
     ):
         super().__init__()
-        norm_klass = BatchRMSNorm if use_batch_rmsnorm else RMSNorm
+        norm_klass = partial(RMSNorm, batch = use_batch_rmsnorm)
 
         self.block = block
         self.pre_rmsnorm = norm_klass(dim)
@@ -359,7 +391,8 @@ class Attention(Module):
         dim_head_v = 192,
         dim_pairwise = None,
         softclamp_value = 5., # they employ attention softclamping
-        use_qk_rmsnorm = True
+        use_qk_rmsnorm = True,
+        attn_bias_use_batch_rmsnorm = True
     ):
         super().__init__()
         dim_pairwise = default(dim_pairwise, dim)
@@ -385,7 +418,7 @@ class Attention(Module):
 
         # they add layernorms to queries, keys, and interestingly enough, values as well. first time i've seen this
 
-        norm_klass = RMSNorm if use_qk_rmsnorm else partial(LayerNorm, bias = False)
+        norm_klass = nn.RMSNorm if use_qk_rmsnorm else partial(LayerNorm, bias = False)
         self.q_norm = norm_klass(dim_head_qk)
         self.k_norm = norm_klass(dim_head_qk)
         self.v_norm = norm_klass(dim_head_v)
@@ -393,7 +426,7 @@ class Attention(Module):
         # to attention bias
 
         self.to_attn_bias = Sequential(
-            BatchRMSNorm(dim_pairwise),
+            RMSNorm(dim_pairwise, batch = attn_bias_use_batch_rmsnorm),
             nn.GELU(),
             LinearNoBias(dim_pairwise, heads),
             Rearrange('b i j (g h) -> b g h i j', g = groups)
@@ -821,12 +854,13 @@ class OutputEmbedding(Module):
         self,
         input_dim,
         num_organisms = 2,
-        skip_dim = None
+        skip_dim = None,
+        use_batch_rmsnorm = True
     ):
         super().__init__()
         self.double_features = Linear(input_dim, 2 * input_dim)
         self.skip_proj = LinearNoBias(skip_dim, 2 * input_dim) if exists(skip_dim) else None
-        self.norm = BatchRMSNorm(2 * input_dim)
+        self.norm = RMSNorm(2 * input_dim, batch = use_batch_rmsnorm)
         self.embed = nn.Embedding(num_organisms, 2 * input_dim)
         self.activation = nn.GELU()
 
