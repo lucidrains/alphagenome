@@ -32,7 +32,7 @@ dna = torch.randint(0, 5, (2, 8192))
 embeds_1bp, embeds_128bp, embeds_pair = model(dna, organism_index = 0) # (2, 8192, 1536), (2, 64, 3072), (2, 4, 4, 128)
 ```
 
-Adding splice heads (thanks to @MiqG)
+Adding splice heads (thanks to [@MiqG](https://github.com/MiqG))
 
 ```python
 import torch
