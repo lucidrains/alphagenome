@@ -27,9 +27,9 @@ model = AlphaGenome()
 
 dna = torch.randint(0, 5, (2, 8192))
 
-organism_index = torch.randint(0, 2, (2,)) # defaults to 2 organisms, 0 for human, 1 for mouse
+# organism_index - 0 for human, 1 for mouse - can be changed with `num_organisms` on `AlphaGenome`
 
-embeds_1bp, embeds_128bp, embeds_pair = model(dna, organism_index) # (2, 8192, 1536), (2, 64, 3072), (2, 4, 4, 128)
+embeds_1bp, embeds_128bp, embeds_pair = model(dna, organism_index = 0) # (2, 8192, 1536), (2, 64, 3072), (2, 4, 4, 128)
 ```
 
 Adding splice heads (thanks to @MiqG)
@@ -49,7 +49,7 @@ model.add_splice_heads(
 
 dna = torch.randint(0, 5, (2, 8192))
 
-organism_index = torch.tensor([0, 0]) # the organism that each sequence belongs to
+organism_index = torch.tensor([0, 1]) # the organism that each sequence belongs to
 splice_donor_idx = torch.tensor([[10, 100, 34], [24, 546, 870]])
 splice_acceptor_idx = torch.tensor([[15, 103, 87], [56, 653, 900]])
 
