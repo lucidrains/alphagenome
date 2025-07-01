@@ -57,11 +57,10 @@ def test_add_custom_head():
             super().__init__()
             self.linear = nn.Linear(dim, 1)
 
-        def forward(self, embeds_1bp):
-            print(embeds_1bp.shape)
-            return rearrange(self.linear(embeds_1bp), '... 1 -> ...')
+        def forward(self, x):
+            return rearrange(self.linear(x), '... 1 -> ...')
 
-    model.add_head('mouse', 'pred_1bp_res', CustomHead(1536))
+    model.add_head('mouse', 'pred_1bp_res', CustomHead(1536), 'embeds_1bp')
 
     dna = torch.randint(0, 5, (2, 8192))
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import inspect
 from functools import partial
-from collections import namedtuple
+from collections import namedtuple, defaultdict
 
 import torch
 import torch.distributed as dist
@@ -957,16 +957,6 @@ class SimpleOutputHead(Module):
         x = self.linear(x)
         return F.softplus(x) * F.softplus(self.scale)
 
-# 1bp and 128bp share the same SimpleOutputHead but with different arg names to route the right embedding
-
-class SimpleOutputHead1bp(SimpleOutputHead):
-    def forward(self, embeds_1bp):
-        return super().forward(embeds_1bp)
-
-class SimpleOutputHead128bp(SimpleOutputHead):
-    def forward(self, embeds_128bp):
-        return super().forward(embeds_128bp)
-
 class ContactMapHead(Module):
     def __init__(
         self,
@@ -1116,25 +1106,38 @@ class AlphaGenome(Module):
         self.dim_contacts = 2 ** len(dims)
 
         self.heads = ModuleDict()
-        self.head_forward_arg_names = dict()
+        self.head_forward_arg_names = defaultdict(dict)
+        self.head_forward_arg_maps = defaultdict(dict) # contains a map of forward argument names to the embed name to be used
 
     def add_head(
         self,
         organism,
         head_name,
         head: Module,
-        head_input_kwarg_names: tuple[str, ...] | None = None
+        head_input_kwarg_names: str | tuple[str, ...] | None = None
     ):
+        if isinstance(head_input_kwarg_names, str):
+            head_input_kwarg_names = (head_input_kwarg_names,)
+
         if organism not in self.heads:
             self.heads[organism] = ModuleDict()
-            self.head_forward_arg_names[organism] = dict()
 
         self.heads[organism][head_name] = head
 
-        if not exists(head_input_kwarg_names):
-            head_input_kwarg_names = get_function_arg_names(head.forward)
+        # store the list of inputs to the head
 
-        self.head_forward_arg_names[organism][head_name] = head_input_kwarg_names
+        head_forward_arg_names = get_function_arg_names(head.forward)
+
+        self.head_forward_arg_names[organism][head_name] = default(head_input_kwarg_names, head_forward_arg_names)
+
+        # create a dict[str, str] for if the custom head contains inputs that are named explicitly through `head_input_kwarg_names` in the order presented in function
+
+        head_forwared_arg_map = dict()
+
+        if exists(head_input_kwarg_names):
+            head_forwared_arg_map = dict(zip(head_input_kwarg_names, head_forward_arg_names))
+
+        self.head_forward_arg_maps[organism][head_name] = head_forwared_arg_map
 
     def add_splice_heads(
         self,
@@ -1149,10 +1152,10 @@ class AlphaGenome(Module):
         organism_heads = (
 
             # RNA-seq, CAGE, ATAC, DNAse and PRO-Cap
-            ("1bp_tracks", SimpleOutputHead1bp(self.dim_1bp, num_tracks_1bp)),
+            ("1bp_tracks", SimpleOutputHead(self.dim_1bp, num_tracks_1bp), ('embeds_1bp',)),
             
             # TF ChIP-seq and Histone ChIP-seq
-            ("128bp_tracks", SimpleOutputHead128bp(self.dim_128bp, num_tracks_128bp)),
+            ("128bp_tracks", SimpleOutputHead(self.dim_128bp, num_tracks_128bp), ('embeds_128bp',)),
 
             # Contact Maps
             ("contact_head", ContactMapHead(self.dim_contacts, self.dim_contacts, self.num_organisms)),
@@ -1163,8 +1166,8 @@ class AlphaGenome(Module):
             ("splice_juncs", SpliceJunctionHead(self.dim_1bp, hidden_dim_splice_juncs, num_splicing_contexts))
         )
 
-        for head_name, head in organism_heads:
-            self.add_head(organism, head_name, head)
+        for add_head_args in organism_heads:
+            self.add_head(organism, *add_head_args)
 
     def get_embeds(
         self,
@@ -1228,6 +1231,8 @@ class AlphaGenome(Module):
 
             organism_head_args = self.head_forward_arg_names[organism]
 
+            organism_head_arg_map = self.head_forward_arg_maps[organism]
+
             organism_out = dict()
 
             for head_name, head in heads.items():
@@ -1235,8 +1240,13 @@ class AlphaGenome(Module):
                 # get the inputs needed for the head, which is determined by the arg / kwarg name on the forward
 
                 head_args = organism_head_args[head_name]
+                head_arg_map = organism_head_arg_map[head_name]
 
                 head_kwargs = {head_arg: head_inputs[head_arg] for head_arg in head_args}
+
+                # remap the kwargs
+
+                head_kwargs = {(head_arg_map.get(k, k)): v for k, v in head_kwargs.items()}
 
                 # forward gathered inputs through the specific head
 
