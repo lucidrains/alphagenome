@@ -68,15 +68,16 @@ def test_add_custom_head():
     pred = model(dna, organism_index = 1) # (2, 8192)
     assert pred['mouse']['pred_1bp_res'].shape == (2, 8192)
 
-def test_splicing_heads():
+def test_output_heads():
     from alphagenome_pytorch.alphagenome import AlphaGenome
 
     model = AlphaGenome()
 
-    model.add_splice_heads(
+    model.add_heads(
         'human',
         num_tracks_1bp = 10,
         num_tracks_128bp = 10,
+        num_tracks_contacts = 128,
         num_splicing_contexts = 64, # 2 strands x num. CURIE conditions
     )
 
