@@ -264,12 +264,12 @@ class BatchRMSNorm(Module):
 
         if update_running_var:
 
-            to_reduce = rearrange(x, 'b d ... -> b ... d') if channel_first else x
+            with torch.no_grad():
+                to_reduce = rearrange(x, 'b d ... -> b ... d') if channel_first else x
 
-            batch_var = get_maybe_dist_var(to_reduce, distributed = self.distributed)
+                batch_var = get_maybe_dist_var(to_reduce, distributed = self.distributed)
 
-            # instead of .lerp_() to avoid inplace computation, which gives gradient problem during backward propagation
-            running_var = running_var.lerp(batch_var, self.momentum) 
+                running_var.lerp_(batch_var, self.momentum)
 
         # get denominator
 

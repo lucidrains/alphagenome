@@ -31,6 +31,8 @@ def test_alphagenome():
 
     embeds_1bp, embeds_128bp, embeds_pair = model(dna, organism_index)
 
+    embeds_1bp.sum().backward() # test backwards
+
     pred = embeds_1bp.argmax(dim = -1)
 
     assert pred.shape[1] == dna.shape[1]
