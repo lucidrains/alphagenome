@@ -56,6 +56,13 @@ def test_add_custom_head():
     pred = model(dna, organism_index = 1) # (2, 8192)
     assert pred['human']['pred_1bp_tracks'].shape == (2, 8192, 10)
 
+def test_target_scaler():
+    from alphagenome_pytorch.alphagenome import TargetScaler
+
+    scaler = TargetScaler([2., 3.])
+    x = torch.randn(1, 3, 2)
+    assert torch.allclose(scaler.inverse(scaler(x)), x)
+
 def test_output_heads():
     from alphagenome_pytorch.alphagenome import AlphaGenome
 

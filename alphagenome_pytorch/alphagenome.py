@@ -6,7 +6,7 @@ from collections import namedtuple, defaultdict
 
 import torch
 import torch.distributed as dist
-from torch import tensor, arange, nn, cat, stack, arange, logspace, Tensor
+from torch import tensor, is_tensor, arange, nn, cat, stack, arange, logspace, Tensor
 import torch.nn.functional as F
 from torch.nn import Conv1d, Linear, Sequential, Module, ModuleList, LayerNorm, ModuleDict
 
@@ -1095,6 +1095,64 @@ class TracksScaledPrediction(Module):
     ):
         track_pred = self.to_pred(x)
         return F.softplus(track_pred) * F.softplus(self.scale)
+
+class SoftClip(Module):
+    def __init__(
+        self,
+        scale = 2.,
+        gamma = 10.,
+        threshold = 10.
+    ):
+        super().__init__()
+        self.scale = scale
+        self.gamma = gamma
+        self.threshold = threshold
+
+    def inverse(self, clipped):
+        threshold, scale, gamma = self.threshold, self.scale, self.gamma
+        return torch.where(clipped > threshold, ((clipped + threshold) ** 2) / (gamma * scale ** 2), clipped)
+
+    def forward(self, x):
+        threshold, scale, gamma = self.threshold, self.scale, self.gamma
+        return torch.where(x > threshold, scale * torch.sqrt(x * gamma).sqrt() - threshold, x)
+
+class TargetScaler(Module):
+    def __init__(
+        self,
+        track_means: list[float] | Tensor,
+        apply_squashing = False, # for rna-seq they squash the signal. not intimate enough with these assays to understand why yet
+        squashing_factor = 0.75,
+        softclip_scale = 2.,
+        softclip_gamma = 10.,
+        softclip_threshold = 10.
+    ):
+        super().__init__()
+
+        if not is_tensor(track_means):
+            track_means = tensor(track_means).float()
+
+        self.register_buffer('track_means', track_means)
+
+        self.apply_squashing = apply_squashing
+        self.squashing_factor = squashing_factor
+
+        self.softclip = SoftClip(threshold = softclip_threshold, scale = softclip_scale, gamma = softclip_gamma)
+
+    def inverse(self, normalized):
+        x = self.softclip.inverse(normalized)
+
+        if self.apply_squashing:
+            x = x ** (1. / self.squashing_factor)
+
+        return x * self.track_means
+
+    def forward(self, tracks):
+        tracks = tracks / self.track_means
+
+        if self.apply_squashing:
+            tracks = tracks ** self.squashing_factor
+
+        return self.softclip(tracks)
 
 # classes
 
