@@ -13,6 +13,8 @@ from alphagenome_pytorch.alphagenome import (
     TargetScaler,
     MultinomialLoss,
     JunctionsLoss,
+    TracksScaledPrediction,
+    SoftClip,
     set_update_running_var,
     publication_heads_config
 )
