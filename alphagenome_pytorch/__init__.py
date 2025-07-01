@@ -10,6 +10,13 @@ from alphagenome_pytorch.alphagenome import (
     UpresBlock,
     DownresBlock,
     BatchRMSNorm,
+    TargetScaler,
+    MultinomialLoss,
+    JunctionsLoss,
     set_update_running_var,
     publication_heads_config
 )
+
+from alphagenome_pytorch.config import AlphaGenomeConfig
+
+from alphagenome_pytorch.data import DummyGenomeDataset, DummyTargetsDataset
