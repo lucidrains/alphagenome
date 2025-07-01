@@ -14,7 +14,7 @@ from torch.nn.utils.parametrize import register_parametrization
 
 from einx import add, multiply, greater
 from einops.layers.torch import Rearrange, Reduce
-from einops import rearrange, repeat, einsum
+from einops import rearrange, repeat, reduce, einsum
 
 # ein notation
 
@@ -23,6 +23,7 @@ from einops import rearrange, repeat, einsum
 # n - sequence
 # p - relative positions
 # d - feature dimension
+# t - tracks
 
 # constants
 
@@ -93,6 +94,40 @@ def symmetrize(t):
 
 def append_dims(t, ndims):
     return t.reshape(*t.shape, *((1,) * ndims))
+
+def log(t, eps):
+    return t.clamp(min = eps).log()
+
+# losses
+
+class MultinomialLoss(Module):
+    def __init__(
+        self,
+        multinomial_resolution,
+        positional_loss_weight = 5.,
+        eps = 1e-7
+    ):
+        super().__init__()
+        self.split_res = Rearrange('... (n resolution) t -> ... n resolution t', resolution = multinomial_resolution)
+
+        self.eps = eps
+        self.log = partial(log, eps = eps)
+        self.resolution = multinomial_resolution
+        self.positional_loss_weight = positional_loss_weight
+
+    def forward(self, pred, target):
+        pred = self.split_res(pred)
+        target = self.split_res(target)
+
+        pred_sum = reduce(pred, '... n resolution t -> ... n 1 t', 'sum')
+        target_sum = reduce(target, '... n resolution t -> ... n 1 t', 'sum')
+
+        poisson_loss = (pred_sum - target_sum * self.log(pred_sum)).sum()
+        multinomial_prob = pred / pred_sum.clamp(min = self.eps)
+
+        positional_loss = (-target * self.log(multinomial_prob)).sum()
+
+        return poisson_loss / self.resolution + positional_loss * self.positional_loss_weight
 
 # batch rmsnorm
 
