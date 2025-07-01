@@ -10,6 +10,9 @@ from alphagenome_pytorch.alphagenome import (
     UpresBlock,
     DownresBlock,
     BatchRMSNorm,
+    TracksScaledPrediction,
+    SoftClip,
+    TargetScaler,
     set_update_running_var,
     publication_heads_config
 )
