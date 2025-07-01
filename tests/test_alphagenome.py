@@ -45,27 +45,16 @@ def test_batchrmsnorm(channel_first):
     assert rmsnorm(x).shape == x.shape
 
 def test_add_custom_head():
-    from torch import nn
-    from torch.nn import Module
-    from alphagenome_pytorch import AlphaGenome
-    from einops import rearrange
+    from alphagenome_pytorch.alphagenome import AlphaGenome, TracksScaledPrediction
 
     model = AlphaGenome()
 
-    class CustomHead(Module):
-        def __init__(self, dim):
-            super().__init__()
-            self.linear = nn.Linear(dim, 1)
-
-        def forward(self, x):
-            return rearrange(self.linear(x), '... 1 -> ...')
-
-    model.add_head('mouse', 'pred_1bp_res', CustomHead(1536), 'embeds_1bp')
+    model.add_head('human', 'pred_1bp_tracks', TracksScaledPrediction(1536, 10), 'embeds_1bp')
 
     dna = torch.randint(0, 5, (2, 8192))
 
     pred = model(dna, organism_index = 1) # (2, 8192)
-    assert pred['mouse']['pred_1bp_res'].shape == (2, 8192)
+    assert pred['human']['pred_1bp_tracks'].shape == (2, 8192, 10)
 
 def test_output_heads():
     from alphagenome_pytorch.alphagenome import AlphaGenome

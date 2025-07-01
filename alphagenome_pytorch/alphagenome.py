@@ -1078,7 +1078,24 @@ class SpliceJunctionHead(Module):
         acceptor_embed = self.tissue_scaled_rope(x_proj, splice_acceptor_idx)
         scores = einsum(donor_embed, acceptor_embed, 'b d t h, b a t h -> b d a t')
         return F.softplus(scores)
-        
+
+class TracksScaledPrediction(Module):
+    def __init__(
+        self,
+        dim,
+        num_tracks
+    ):
+        super().__init__()
+        self.to_pred = Linear(dim, num_tracks)
+        self.scale = nn.Parameter(torch.zeros(num_tracks))
+
+    def forward(
+        self,
+        x
+    ):
+        track_pred = self.to_pred(x)
+        return F.softplus(track_pred) * F.softplus(self.scale)
+
 # classes
 
 class AlphaGenome(Module):
