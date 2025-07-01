@@ -1145,6 +1145,10 @@ class AlphaGenome(Module):
         self.head_forward_arg_names = defaultdict(dict)
         self.head_forward_arg_maps = defaultdict(dict) # contains a map of forward argument names to the embed name to be used
 
+    @property
+    def total_parameters(self):
+        return sum([p.numel() for p in self.parameters()])
+
     def add_head(
         self,
         organism,
