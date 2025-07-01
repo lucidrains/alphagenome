@@ -1031,13 +1031,14 @@ class SpliceJunctionHead(Module):
         self,
         input_dim,
         hidden_dim,
-        n_contexts
+        n_contexts,
+        rope_max_position = 2 ** 20
     ):
         super().__init__()
         self.project = Linear(input_dim, hidden_dim)
         self.scale = nn.Parameter(torch.ones(n_contexts, hidden_dim))
         self.offset = nn.Parameter(torch.zeros(n_contexts, hidden_dim))
-        self.rope = RotaryEmbedding(hidden_dim)
+        self.rope = RotaryEmbedding(hidden_dim, max_positions = rope_max_position)
         self.n_contexts = n_contexts
 
     def tissue_scaled_rope(
