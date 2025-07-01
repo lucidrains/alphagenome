@@ -129,6 +129,75 @@ class MultinomialLoss(Module):
 
         return poisson_loss / self.resolution + positional_loss * self.positional_loss_weight
 
+
+class SoftClip(Module):
+    def __init__(
+        self, 
+        threshold = 10.0
+    ):
+        super().__init__()
+        self.threshold = threshold
+
+    def forward(
+        self, 
+        x: torch.Tensor
+    ):
+        x = torch.where(
+            x > self.threshold,
+            2 * torch.sqrt(x * self.threshold) - self.threshold,
+            x
+        )
+        return x
+
+def multinomial_cross_entropy(
+    x: torch.Tensor, 
+    targets: torch.Tensor, 
+    axis: int, 
+    eps=1e-7
+):
+    x = x + eps
+    targets = targets + eps
+    pred_ratios = x / x.sum(dim=axis, keepdim=True)
+    target_ratios = targets / targets.sum(dim=axis, keepdim=True)
+    return -(target_ratios * torch.log(pred_ratios)).sum()
+
+def poisson_loss(
+    x: torch.Tensor,
+    targets: torch.Tensor,
+    axis: int,
+    soft_clip: SoftClip, 
+    eps=1e-7
+):
+    sum_pred = x.sum(dim=axis)
+    sum_targets = soft_clip(targets.sum(dim=axis))
+    return (sum_pred - sum_targets * torch.log(sum_pred + eps)).sum()
+
+class JunctionsLoss(Module):
+    def __init__(
+        self, 
+        threshold=10.0
+    ):
+        super().__init__()
+        self.soft_clip = SoftClip(threshold=threshold)
+
+    def forward(
+        self, 
+        pred: torch.Tensor, 
+        target: torch.Tensor
+    ):
+        loss = 0.0
+        for c in range(pred.shape[-1]):
+            pred_c = pred[..., c]
+            target_c = target[..., c]
+            ratios = multinomial_cross_entropy(pred_c, target_c, axis=0) + \
+                     multinomial_cross_entropy(pred_c, target_c, axis=1)
+            counts = poisson_loss(pred_c, target_c, axis=0, soft_clip=self.soft_clip) + \
+                     poisson_loss(pred_c, target_c, axis=1, soft_clip=self.soft_clip)
+            loss = loss + ( 0.2 * ratios + 0.04 * counts )
+
+        return loss
+
+
 # batch rmsnorm
 
 def is_distributed():
@@ -199,7 +268,8 @@ class BatchRMSNorm(Module):
 
             batch_var = get_maybe_dist_var(to_reduce, distributed = self.distributed)
 
-            running_var.lerp_(batch_var, self.momentum)
+            # instead of .lerp_() to avoid inplace computation, which gives gradient problem during backward propagation
+            running_var = running_var.lerp(batch_var, self.momentum) 
 
         # get denominator
 
@@ -742,6 +812,9 @@ class TransformerTower(Module):
 
         self.layers = ModuleList(layers)
 
+        # accessible attributes
+        self.dim_pairwise = dim_pairwise
+
     def forward(
         self,
         single
@@ -974,7 +1047,7 @@ class OutputPairEmbedding(Module):
 
     def forward(
         self,
-        x,  # Float["b n n d"]
+        x,  # Float['b n n d']
         organism_index
     ):
         x = symmetrize(x)
@@ -996,20 +1069,6 @@ def is_disjoint(a: set, b: set):
     return not any(a.intersection(b))
 
 # output heads
-
-class SimpleOutputHead(Module):
-    def __init__(
-        self,
-        input_dim,
-        out_dim
-    ):
-        super().__init__()
-        self.linear = Linear(input_dim, out_dim)
-        self.scale = nn.Parameter(torch.zeros(out_dim))
-
-    def forward(self, x):
-        x = self.linear(x)
-        return F.softplus(x) * F.softplus(self.scale)
 
 class ContactMapHead(Module):
     def __init__(
@@ -1226,14 +1285,14 @@ class AlphaGenome(Module):
 
         self.outembed_128bp = OutputEmbedding(last_dim, num_organisms)
         self.outembed_1bp = OutputEmbedding(first_dim, num_organisms, skip_dim = 2*last_dim)
-        self.outembed_pair = OutputPairEmbedding(2**len(dims), num_organisms)
+        self.outembed_pair = OutputPairEmbedding(self.transformer_unet.transformer.dim_pairwise, num_organisms)
 
         # heads
 
         self.num_organisms = num_organisms
         self.dim_1bp = last_dim
         self.dim_128bp = 2 * last_dim
-        self.dim_contacts = 2 ** len(dims)
+        self.dim_contacts = self.transformer_unet.transformer.dim_pairwise
 
         self.heads = ModuleDict()
         self.head_forward_arg_names = defaultdict(dict)
@@ -1287,18 +1346,18 @@ class AlphaGenome(Module):
         organism_heads = (
 
             # RNA-seq, CAGE, ATAC, DNAse and PRO-Cap
-            ("1bp_tracks", SimpleOutputHead(self.dim_1bp, num_tracks_1bp), ('embeds_1bp',)),
+            ('1bp_tracks', TracksScaledPrediction(self.dim_1bp, num_tracks_1bp), ('embeds_1bp',)),
             
             # TF ChIP-seq and Histone ChIP-seq
-            ("128bp_tracks", SimpleOutputHead(self.dim_128bp, num_tracks_128bp), ('embeds_128bp',)),
+            ('128bp_tracks', TracksScaledPrediction(self.dim_128bp, num_tracks_128bp), ('embeds_128bp',)),
 
             # Contact Maps
-            ("contact_head", ContactMapHead(self.dim_contacts, num_tracks_contacts, self.num_organisms)),
+            ('contact_head', ContactMapHead(self.dim_contacts, num_tracks_contacts, self.num_organisms)),
 
             # Splicing
-            ("splice_probs", SpliceSiteClassifier(self.dim_1bp)),
-            ("splice_usage", SpliceSiteUsage(self.dim_1bp, num_splicing_contexts)),
-            ("splice_juncs", SpliceJunctionHead(self.dim_1bp, hidden_dim_splice_juncs, num_splicing_contexts))
+            ('splice_probs', SpliceSiteClassifier(self.dim_1bp)),
+            ('splice_usage', SpliceSiteUsage(self.dim_1bp, num_splicing_contexts)),
+            ('splice_juncs', SpliceJunctionHead(self.dim_1bp, hidden_dim_splice_juncs, num_splicing_contexts))
         )
 
         for add_head_args in organism_heads:

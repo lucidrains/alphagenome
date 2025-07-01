@@ -82,7 +82,17 @@ for organism, outputs in out.items():
 model = AlphaGenome()
 model.add_heads(**publication_heads_config['human'])
 model.add_heads(**publication_heads_config['mouse'])
-total_parameters = sum(p.numel() for p in model.parameters()) # 259,459,534 (vs ~450 million trainable parameters)
+model.total_parameters # 259,459,534 (vs ~450 million trainable parameters)
+```
+
+## Training
+
+### test minimal architecture
+```shell
+# loss quickly decreases and stabilizes at around 1349651
+# this minimal model (576,444 parameters) can be run with cpu
+
+python tests/dummy_training.py --config_file=configs/dummy_training.yaml
 ```
 
 ## Contributing

@@ -1,0 +1,41 @@
+# general training
+seed: 1234
+seq_len: 8192
+num_samples: 12
+batch_size: 6
+num_workers: 4
+epochs: 10
+lr: 0.0001
+checkpoint_freq: 5
+checkpoint_dir: ./outputs_test_training/checkpoints
+output_dir: ./outputs_test_training/pretrained
+
+# architecture
+model:
+  dims: [16, 32]
+  basepairs: 5
+  dna_embed_width: 15
+  num_organisms: 2
+  transformer_kwargs:
+    depth: 1
+    heads: 1
+    dim_head_qk: 128
+    dim_head_v: 192
+    ff_expansion_factor: 2.0
+    dropout: 0.0
+
+# output heads
+heads:
+  human:
+    num_tracks_1bp: 1
+    num_tracks_128bp: 1
+    num_tracks_contacts: 1
+    num_splicing_contexts: 3
+    hidden_dim_splice_juncs: 64
+
+  mouse:
+    num_tracks_1bp: 1
+    num_tracks_128bp: 1
+    num_tracks_contacts: 1
+    num_splicing_contexts: 3
+    hidden_dim_splice_juncs: 64
