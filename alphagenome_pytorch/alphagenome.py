@@ -1070,20 +1070,6 @@ def is_disjoint(a: set, b: set):
 
 # output heads
 
-class SimpleOutputHead(Module):
-    def __init__(
-        self,
-        input_dim,
-        out_dim
-    ):
-        super().__init__()
-        self.linear = Linear(input_dim, out_dim)
-        self.scale = nn.Parameter(torch.zeros(out_dim))
-
-    def forward(self, x):
-        x = self.linear(x)
-        return F.softplus(x) * F.softplus(self.scale)
-
 class ContactMapHead(Module):
     def __init__(
         self,
@@ -1360,10 +1346,10 @@ class AlphaGenome(Module):
         organism_heads = (
 
             # RNA-seq, CAGE, ATAC, DNAse and PRO-Cap
-            ('1bp_tracks', SimpleOutputHead(self.dim_1bp, num_tracks_1bp), ('embeds_1bp',)),
+            ('1bp_tracks', TracksScaledPrediction(self.dim_1bp, num_tracks_1bp), ('embeds_1bp',)),
             
             # TF ChIP-seq and Histone ChIP-seq
-            ('128bp_tracks', SimpleOutputHead(self.dim_128bp, num_tracks_128bp), ('embeds_128bp',)),
+            ('128bp_tracks', TracksScaledPrediction(self.dim_128bp, num_tracks_128bp), ('embeds_128bp',)),
 
             # Contact Maps
             ('contact_head', ContactMapHead(self.dim_contacts, num_tracks_contacts, self.num_organisms)),
