@@ -1,3 +1,5 @@
+import numpy as np
+import torch
 from torch.utils.data import Dataset
 
 class DummyTargetsDataset(Dataset):
@@ -16,10 +18,10 @@ class DummyTargetsDataset(Dataset):
     def __getitem__(self, idx):
         np.random.seed(self.global_seed + idx)
 
-        targets = {}
+        item = {}
         for organism, config in self.heads_cfg.items():
         
-            targets[organism] = {
+            item[organism] = {
                 'target_1bp_tracks': torch.rand(self.len_1bp, config['num_tracks_1bp']).clamp(min=0.01),
                 'target_128bp_tracks': torch.rand(self.len_128bp, config['num_tracks_128bp']).clamp(min=0.01),
                 'target_contact_head': torch.rand(self.dim_contacts, self.dim_contacts, config['num_tracks_contacts']).clamp(min=0.01),
@@ -29,7 +31,7 @@ class DummyTargetsDataset(Dataset):
 
             }
         
-        return targets
+        return item
 
 class DummyGenomeDataset(Dataset):
     def __init__(self, seq_len, num_samples, targets_dataset = None, global_seed = 1234):
