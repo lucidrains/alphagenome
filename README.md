@@ -7,7 +7,7 @@ Implementation of [AlphaGenome](https://deepmind.google/discover/blog/alphagenom
 
 ## Appreciation
 
-- [Miquel Anglada-Girotto](https://github.com/MiqG) for contributing the organism, output embedding, and all the splicing prediction heads!
+- [Miquel Anglada-Girotto](https://github.com/MiqG) for contributing the organism, output embedding, loss functions, and all the splicing prediction heads!
 
 ## Install
 
