@@ -7,7 +7,7 @@ Implementation of [AlphaGenome](https://deepmind.google/discover/blog/alphagenom
 
 ## Appreciation
 
-- [Miquel Girotto](https://github.com/MiqG) for contributing the organism, output embedding, and all the splicing prediction heads!
+- [Miquel Anglada-Girotto](https://github.com/MiqG) for contributing the organism, output embedding, and all the splicing prediction heads!
 
 ## Install
 
@@ -32,18 +32,19 @@ dna = torch.randint(0, 5, (2, 8192))
 embeds_1bp, embeds_128bp, embeds_pair = model(dna, organism_index = 0) # (2, 8192, 1536), (2, 64, 3072), (2, 4, 4, 128)
 ```
 
-Adding splice heads (thanks to [@MiqG](https://github.com/MiqG))
+Adding all types of output heads (thanks to [@MiqG](https://github.com/MiqG))
 
 ```python
 import torch
-from alphagenome_pytorch import AlphaGenome
+from alphagenome_pytorch import AlphaGenome, publication_heads_config
 
 model = AlphaGenome()
 
-model.add_splice_heads(
+model.add_heads(
     'human',
     num_tracks_1bp = 10,
     num_tracks_128bp = 10,
+    num_tracks_contacts = 128,
     num_splicing_contexts = 64, # 2 strands x num. CURIE conditions
 )
 
@@ -76,6 +77,12 @@ for organism, outputs in out.items():
 # human splice_probs torch.Size([2, 8192, 5])
 # human splice_usage torch.Size([2, 8192, 64])
 # human splice_juncs torch.Size([2, 3, 3, 64])
+
+# initialize published AlphaGenome for human and mouse
+model = AlphaGenome()
+model.add_heads(**publication_heads_config['human'])
+model.add_heads(**publication_heads_config['mouse'])
+total_parameters = sum(p.numel() for p in model.parameters()) # 259,459,534 (vs ~450 million trainable parameters)
 ```
 
 ## Contributing
@@ -99,9 +106,15 @@ Vibe coding with some attention network is totally welcomed, if it works
 ## Citations
 
 ```bibtex
-@article{avsec2025alphagenome,
-  title   = {AlphaGenome: advancing regulatory variant effect prediction with a unified DNA sequence model},
-  author  = {Avsec, {\v{Z}}iga and Latysheva, Natasha and Cheng, Jun and Novati, Guido and Taylor, Kyle R and Ward, Tom and Bycroft, Clare and Nicolaisen, Lauren and Arvaniti, Eirini and Pan, Joshua and Thomas, Raina and Dutordoir, Vincent and Perino, Matteo and De, Soham and Karollus, Alexander and Gayoso, Adam and Sargeant, Toby and Mottram, Anne and Wong, Lai Hong and Drot{\'a}r, Pavol and Kosiorek, Adam and Senior, Andrew and Tanburn, Richard and Applebaum, Taylor and Basu, Souradeep and Hassabis, Demis and Kohli, Pushmeet},
-  year    = {2025}
+@article {avsec2025alphagenome,
+	title = {AlphaGenome: advancing regulatory variant effect prediction with a unified DNA sequence model},
+	author = {Avsec, {\v Z}iga and Latysheva, Natasha and Cheng, Jun and Novati, Guido and Taylor, Kyle R. and Ward, Tom and Bycroft, Clare and Nicolaisen, Lauren and Arvaniti, Eirini and Pan, Joshua and Thomas, Raina and Dutordoir, Vincent and Perino, Matteo and De, Soham and Karollus, Alexander and Gayoso, Adam and Sargeant, Toby and Mottram, Anne and Wong, Lai Hong and Drot{\'a}r, Pavol and Kosiorek, Adam and Senior, Andrew and Tanburn, Richard and Applebaum, Taylor and Basu, Souradeep and Hassabis, Demis and Kohli, Pushmeet},
+	elocation-id = {2025.06.25.661532},
+	year = {2025},
+	doi = {10.1101/2025.06.25.661532},
+	publisher = {Cold Spring Harbor Laboratory},
+	URL = {https://www.biorxiv.org/content/early/2025/06/27/2025.06.25.661532},
+	eprint = {https://www.biorxiv.org/content/early/2025/06/27/2025.06.25.661532.full.pdf},
+	journal = {bioRxiv}
 }
 ```

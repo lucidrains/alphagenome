@@ -40,6 +40,25 @@ Embeds = namedtuple('Embeds', [
     'embeds_pair',
 ])
 
+publication_heads_config = {
+    'human': {
+        'organism' : 'human',
+        'num_tracks_1bp' : 3165, # 1174 total RNA-seq + 961 polyA plus RNA-seq + 516 hCAGE + 30 LQhCAGE + 167 ATAC-seq + 305 DNase-seq + 12 PRO-cap
+        'num_tracks_128bp' : 2733, # 1617 TF ChIP-seq + 1116 Histone ChIP-seq
+        'num_tracks_contacts' : 28, # 24 in situ Hi-C + 3 Micro-C + 1 Dilution Hi-C
+        'num_splicing_contexts' : 282, # from Sup. Tab. 2
+        'hidden_dim_splice_juncs' : 512 # max number of splice junctions to consider
+    },
+    'mouse': {
+        'organism' : 'mouse',
+        'num_tracks_1bp' : 730, # 168 total RNA-seq + 365 polyA plus RNA-seq + 172 hCAGE + 16 LQhCAGE + 18 ATAC-seq + 67 DNase-seq
+        'num_tracks_128bp' : 310, # 127 TF ChIP-seq + 183 Histone ChIP-seq
+        'num_tracks_contacts' : 8, # 8 in situ Hi-C
+        'num_splicing_contexts' : 75, # from Sup. Tab. 2
+        'hidden_dim_splice_juncs' : 512 # max number of splice junctions to consider
+    }
+}
+
 # functions
 
 def exists(v):
@@ -961,14 +980,14 @@ class ContactMapHead(Module):
     def __init__(
         self,
         input_dim,
-        out_dim,
+        num_tracks,
         num_organisms
     ):
         super().__init__()
         self.norm = RMSNorm(input_dim)
         self.embed = nn.Embedding(num_organisms, input_dim)
         self.gelu = nn.GELU()
-        self.proj = Linear(input_dim, out_dim)
+        self.proj = Linear(input_dim, num_tracks)
         
     def forward(
         self,
@@ -1139,11 +1158,12 @@ class AlphaGenome(Module):
 
         self.head_forward_arg_maps[organism][head_name] = head_forwared_arg_map
 
-    def add_splice_heads(
+    def add_heads(
         self,
         organism,
         num_tracks_1bp,
         num_tracks_128bp,
+        num_tracks_contacts,
         num_splicing_contexts,
         hidden_dim_splice_juncs = 512
     ):
@@ -1158,7 +1178,7 @@ class AlphaGenome(Module):
             ("128bp_tracks", SimpleOutputHead(self.dim_128bp, num_tracks_128bp), ('embeds_128bp',)),
 
             # Contact Maps
-            ("contact_head", ContactMapHead(self.dim_contacts, self.dim_contacts, self.num_organisms)),
+            ("contact_head", ContactMapHead(self.dim_contacts, num_tracks_contacts, self.num_organisms)),
 
             # Splicing
             ("splice_probs", SpliceSiteClassifier(self.dim_1bp)),
