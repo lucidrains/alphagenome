@@ -11,5 +11,5 @@ from alphagenome_pytorch.alphagenome import (
     DownresBlock,
     BatchRMSNorm,
     set_update_running_var,
-    publication_heads
+    publication_heads_config
 )
