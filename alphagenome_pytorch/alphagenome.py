@@ -95,8 +95,11 @@ def symmetrize(t):
 def append_dims(t, ndims):
     return t.reshape(*t.shape, *((1,) * ndims))
 
-def log(t, eps):
+def log(t, eps = 1e-7):
     return t.clamp(min = eps).log()
+
+def safe_div(num, den, eps = 1e-7):
+    return num / den.clamp(min = eps)
 
 # losses
 
@@ -149,54 +152,68 @@ class SoftClip(Module):
         )
         return x
 
-def multinomial_cross_entropy(
-    x: torch.Tensor, 
-    targets: torch.Tensor, 
-    axis: int, 
-    eps=1e-7
-):
-    x = x + eps
-    targets = targets + eps
-    pred_ratios = x / x.sum(dim=axis, keepdim=True)
-    target_ratios = targets / targets.sum(dim=axis, keepdim=True)
-    return -(target_ratios * torch.log(pred_ratios)).sum()
+class MultinomialCrossEntropy(Module):
+    def __init__(
+        self,
+        dim = -1,
+        eps = 1e-7
+    ):
+        super().__init__()
+        self.dim = dim
+        self.eps = eps
 
-def poisson_loss(
-    x: torch.Tensor,
-    targets: torch.Tensor,
-    axis: int,
-    soft_clip: SoftClip, 
-    eps=1e-7
-):
-    sum_pred = x.sum(dim=axis)
-    sum_targets = soft_clip(targets.sum(dim=axis))
-    return (sum_pred - sum_targets * torch.log(sum_pred + eps)).sum()
+    def forward(self, pred, target):
+        pred_ratios = safe_div(pred, pred.sum(dim = self.dim, keepdim = True), eps = self.eps)
+        target_ratios = safe_div(target, target.sum(dim = self.dim, keepdim = True), eps = self.eps)
+        return -(target_ratios * log(pred_ratios, eps = self.eps)).sum()
+
+class PoissonLoss(Module):
+    def __init__(
+        self,
+        dim = -1,
+        eps = 1e-7,
+        softclip_threshold = 10.
+    ):
+        super().__init__()
+        self.dim = dim
+        self.eps = eps
+        self.softclip = SoftClip(softclip_threshold)
+
+    def forward(self, pred, target):
+        sum_pred = pred.sum(dim = self.dim)
+        sum_target = self.softclip(target.sum(dim = self.dim))
+        return (sum_pred - sum_target * log(sum_pred, eps = self.eps)).sum()
 
 class JunctionsLoss(Module):
     def __init__(
         self, 
-        threshold=10.0
+        softclip_threshold = 10.
     ):
         super().__init__()
-        self.soft_clip = SoftClip(threshold=threshold)
+        self.multinomial_cross_entropy_row = MultinomialCrossEntropy(dim = 0)
+        self.multinomial_cross_entropy_col = MultinomialCrossEntropy(dim = 1)
+
+        self.poisson_loss_row = PoissonLoss(dim = 0, softclip_threshold = softclip_threshold)
+        self.poisson_loss_col = PoissonLoss(dim = 1, softclip_threshold = softclip_threshold)
 
     def forward(
         self, 
-        pred: torch.Tensor, 
-        target: torch.Tensor
+        pred: Tensor, 
+        target: Tensor
     ):
         loss = 0.0
-        for c in range(pred.shape[-1]):
-            pred_c = pred[..., c]
-            target_c = target[..., c]
-            ratios = multinomial_cross_entropy(pred_c, target_c, axis=0) + \
-                     multinomial_cross_entropy(pred_c, target_c, axis=1)
-            counts = poisson_loss(pred_c, target_c, axis=0, soft_clip=self.soft_clip) + \
-                     poisson_loss(pred_c, target_c, axis=1, soft_clip=self.soft_clip)
+
+        for pred_c, target_c in zip(pred.unbind(dim = -1), target.unbind(dim = -1)):
+
+            ratios = self.multinomial_cross_entropy_row(pred_c, target_c) + \
+                     self.multinomial_cross_entropy_col(pred_c, target_c)
+
+            counts = self.poisson_loss_row(pred_c, target_c) + \
+                     self.poisson_loss_col(pred_c, target_c)
+
             loss = loss + ( 0.2 * ratios + 0.04 * counts )
 
         return loss
-
 
 # batch rmsnorm
 

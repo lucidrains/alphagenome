@@ -65,13 +65,27 @@ def test_target_scaler():
     x = torch.randn(1, 3, 2)
     assert torch.allclose(scaler.inverse(scaler(x)), x)
 
-def test_multinomial_loss():
-    from alphagenome_pytorch.alphagenome import MultinomialLoss
+def test_losses():
+    from alphagenome_pytorch.alphagenome import (
+        MultinomialLoss,
+        PoissonLoss,
+        MultinomialCrossEntropy
+    )
+
     loss_fn = MultinomialLoss(128)
 
-    x = torch.randn(1, 8192, 5)
+    pred = torch.randn(1, 8192, 5)
     target = torch.randn(1, 8192, 5)
-    loss = loss_fn(x, target)
+
+    loss = loss_fn(pred, target)
+    assert loss.numel() == 1
+
+    loss_fn = MultinomialCrossEntropy()
+    loss = loss_fn(pred, target)
+    assert loss.numel() == 1
+
+    loss_fn = PoissonLoss()
+    loss = loss_fn(pred, target)
     assert loss.numel() == 1
 
 def test_output_heads():

@@ -15,6 +15,8 @@ from alphagenome_pytorch.alphagenome import (
     JunctionsLoss,
     TracksScaledPrediction,
     SoftClip,
+    PoissonLoss,
+    MultinomialCrossEntropy,
     set_update_running_var,
     publication_heads_config
 )
