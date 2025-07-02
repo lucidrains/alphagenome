@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import argparse
 import os
 import yaml
@@ -11,7 +13,12 @@ from torch.utils.data import DataLoader
 from alphagenome_pytorch import AlphaGenome, AlphaGenomeConfig, TargetScaler, MultinomialLoss, JunctionsLoss
 from alphagenome_pytorch.data import DummyGenomeDataset, DummyTargetsDataset
 
+from accelerate import Accelerator
+
 # util
+
+def exists(v):
+    return v is not None
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -39,7 +46,7 @@ def save_model(model, optimizer, epoch, path):
 
 # training
 
-def train_one_epoch(model, dataloader, optimizer, loss_fns, target_scaler, index_to_organism, device):
+def train_one_epoch(model, dataloader, optimizer, loss_fns, target_scaler, index_to_organism, device, accelerator: Accelerator | None = None):
     model.train()
     total_loss = 0.0
 
@@ -73,10 +80,15 @@ def train_one_epoch(model, dataloader, optimizer, loss_fns, target_scaler, index
 
         loss = torch.stack(losses).sum()
 
+        if exists(accelerator):
+            accelerator.backward(loss)
+        else:
+            loss.backward()
+
         # Backpropagation
-        optimizer.zero_grad()
-        loss.backward()
+
         optimizer.step()
+        optimizer.zero_grad()
 
         total_loss += loss.item()
 
@@ -131,9 +143,6 @@ def main():
         print(f"Using {torch.cuda.device_count()} GPUs.")
         model = nn.DataParallel(model)
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = model.to(device)
-
     # dataset
     
     targets_dataset = DummyTargetsDataset(heads_cfg, seq_len, dim_contacts=model.dim_contacts, global_seed=seed)
@@ -147,18 +156,31 @@ def main():
     # optimization
     
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+
+    # prepare accelerator for distributed
+
+    accelerate_kwargs = {}
+
+    accelerator = Accelerator(**accelerate_kwargs)
+
+    model, train_loader, optimizer = accelerator.prepare(model, train_loader, optimizer)
+
+    device = accelerator.device
+
+    # scaler and losses
+
     target_scaler = {
         organism : {
-                '1bp_tracks': TargetScaler(track_means = torch.ones(heads['num_tracks_1bp'])),
-                '128bp_tracks': TargetScaler(track_means = torch.ones(heads['num_tracks_128bp']))
-            }
+            '1bp_tracks': TargetScaler(track_means = torch.ones(heads['num_tracks_1bp'])).to(device),
+            '128bp_tracks': TargetScaler(track_means = torch.ones(heads['num_tracks_128bp'])).to(device)
+        }
         for organism, heads in heads_cfg.items()
     }
     loss_fns = {
         '1bp_tracks' : MultinomialLoss(multinomial_resolution = seq_len // 1),
         '128bp_tracks' : MultinomialLoss(multinomial_resolution = seq_len // 128),
         'contact_head' : nn.MSELoss(),
-        'splice_probs' : nn.CrossEntropyLoss(),
+        'splice_probs' : nn.CrossEntropyLoss(), # this should act on the splice logits
         'splice_usage' : nn.CrossEntropyLoss(),
         'splice_juncs' : JunctionsLoss()
     }
@@ -173,14 +195,17 @@ def main():
             loss_fns = loss_fns,
             target_scaler = target_scaler,
             index_to_organism = index_to_organism,
+            accelerator = accelerator,
             device = device
         )
         print(f"[Epoch {epoch+1}] Train Loss: {avg_train_loss:.4f}")
     
-        if (epoch + 1) % checkpoint_freq == 0:
+        if (epoch + 1) % checkpoint_freq == 0 and accelerator.is_main_process:
             save_path = os.path.join(checkpoint_dir, f'epoch_{epoch+1}.pt')
             save_model(model, optimizer, epoch + 1, save_path)
             print(f"Saved checkpoint: {save_path}")
+
+        accelerator.wait_for_everyone()
 
     # save final model
     

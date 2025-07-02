@@ -1,6 +1,6 @@
 [project]
 name = "alphagenome-pytorch"
-version = "0.0.37"
+version = "0.0.38"
 description = "AlphaGenome"
 authors = [
     { name = "Phil Wang", email = "lucidrains@gmail.com" }
@@ -26,6 +26,7 @@ classifiers=[
 ]
 
 dependencies = [
+    "accelerate",
     "einx>=0.3.0",
     "einops>=0.8.0",
     "torch>=2.4",
@@ -39,6 +40,10 @@ Repository = "https://github.com/lucidrains/alphagenome"
 examples = []
 test = [
     "pytest"
+]
+
+example = [
+    "yaml"
 ]
 
 [tool.pytest.ini_options]

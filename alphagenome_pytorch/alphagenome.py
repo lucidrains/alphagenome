@@ -487,6 +487,11 @@ class RelativePosFeatures(Module):
     def __init__(self, pool_size = 16):
         super().__init__()
         self.pool_size = pool_size
+        self.register_buffer('dummy', tensor(0))
+
+    @property
+    def device(self):
+        return self.dummy.device
 
     def forward(self, single):
 
@@ -495,11 +500,11 @@ class RelativePosFeatures(Module):
         seq_len //= self.pool_size
         half_dim = dim // 2
 
-        rel_pos = arange(2 * seq_len - 1) - (seq_len - 1)
+        rel_pos = arange(2 * seq_len - 1, device = self.device) - (seq_len - 1)
 
         center_widths = (
-            arange(half_dim) +
-            logspace(1, seq_len - half_dim + 1, half_dim + 1)[:-1] # endpoint = False
+            arange(half_dim, device = self.device) +
+            logspace(1, seq_len - half_dim + 1, half_dim + 1, device = self.device)[:-1] # endpoint = False
         )
 
         abs_rel_pos, rel_pos_sign = rel_pos.abs(), rel_pos.sign()
