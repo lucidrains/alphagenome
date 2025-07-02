@@ -74,7 +74,7 @@ for organism, outputs in out.items():
 # human 1bp_tracks torch.Size([2, 8192, 10])
 # human 128bp_tracks torch.Size([2, 64, 10])
 # human contact_head torch.Size([2, 4, 4, 128])
-# human splice_probs torch.Size([2, 8192, 5])
+# human splice_logits torch.Size([2, 8192, 5])
 # human splice_usage torch.Size([2, 8192, 64])
 # human splice_juncs torch.Size([2, 3, 3, 64])
 

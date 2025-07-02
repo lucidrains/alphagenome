@@ -1129,7 +1129,7 @@ class SpliceSiteClassifier(Module):
         self,
         embeds_1bp
     ):
-        return self.linear(embeds_1bp).softmax(dim = -1)
+        return self.linear(embeds_1bp)
 
 class SpliceSiteUsage(Module):
     def __init__(self, input_dim, n_contexts):
@@ -1377,7 +1377,7 @@ class AlphaGenome(Module):
             ('contact_head', ContactMapHead(self.dim_contacts, num_tracks_contacts, self.num_organisms)),
 
             # Splicing
-            ('splice_probs', SpliceSiteClassifier(self.dim_1bp)),
+            ('splice_logits', SpliceSiteClassifier(self.dim_1bp)),
             ('splice_usage', SpliceSiteUsage(self.dim_1bp, num_splicing_contexts)),
             ('splice_juncs', SpliceJunctionHead(self.dim_1bp, hidden_dim_splice_juncs, num_splicing_contexts))
         )

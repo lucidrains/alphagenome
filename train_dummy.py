@@ -180,7 +180,7 @@ def main():
         '1bp_tracks' : MultinomialLoss(multinomial_resolution = seq_len // 1),
         '128bp_tracks' : MultinomialLoss(multinomial_resolution = seq_len // 128),
         'contact_head' : nn.MSELoss(),
-        'splice_probs' : nn.CrossEntropyLoss(), # this should act on the splice logits
+        'splice_logits' : nn.CrossEntropyLoss(),
         'splice_usage' : nn.CrossEntropyLoss(),
         'splice_juncs' : JunctionsLoss()
     }
