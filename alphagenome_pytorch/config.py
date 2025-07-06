@@ -19,7 +19,7 @@ class AlphaGenomeConfig:
         self.num_organisms = num_organisms
 
         self.transformer_kwargs = transformer_kwargs or {
-            "depth": 8,
+            "depth": 9,
             "heads": 8,
             "dim_head_qk": 128,
             "dim_head_v": 192,

@@ -1,66 +1,47 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
-name = "alphagenome-pytorch"
-version = "0.0.39"
-description = "AlphaGenome"
-authors = [
-    { name = "Phil Wang", email = "lucidrains@gmail.com" }
-]
+name = "bactagenome"
+version = "0.1.0"
+description = "Bacterial genome modeling with AlphaGenome architecture"
 readme = "README.md"
-requires-python = ">= 3.9"
-license = { file = "LICENSE" }
-keywords = [
-    'artificial intelligence',
-    'deep learning',
-    'transformers',
-    'attention mechanism',
-    'genomics',
-    'splicing',
+license = {text = "MIT"}
+authors = [
+    {name = "BactaGenome Team", email = "bactagenome@example.com"}
 ]
-
-classifiers=[
-    'Development Status :: 4 - Beta',
-    'Intended Audience :: Developers',
-    'Topic :: Scientific/Engineering :: Artificial Intelligence',
-    'License :: OSI Approved :: MIT License',
-    'Programming Language :: Python :: 3.9',
+maintainers = [
+    {name = "BactaGenome Team", email = "bactagenome@example.com"}
 ]
-
-dependencies = [
-    "accelerate",
-    "einx>=0.3.0",
-    "einops>=0.8.0",
-    "torch>=2.4",
+keywords = ["genomics", "bacteria", "deep-learning", "synthetic-biology", "transformer"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
 ]
+requires-python = ">=3.9"
 
-[project.urls]
-Homepage = "https://pypi.org/project/alphagenome-pytorch/"
-Repository = "https://github.com/lucidrains/alphagenome"
+[tool.black]
+line-length = 88
+target-version = ['py39']
+include = '\.pyi?$'
 
-[project.optional-dependencies]
-examples = []
-test = [
-    "pytest"
-]
-
-example = [
-    "yaml"
-]
+[tool.isort]
+profile = "black"
+multi_line_output = 3
+line_length = 88
+known_first_party = ["bactagenome"]
 
 [tool.pytest.ini_options]
-pythonpath = [
-  "."
-]
-
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
-[tool.rye]
-managed = true
-dev-dependencies = []
-
-[tool.hatch.metadata]
-allow-direct-references = true
-
-[tool.hatch.build.targets.wheel]
-packages = ["alphagenome_pytorch"]
+minversion = "6.0"
+addopts = "-ra -q --strict-markers"
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]

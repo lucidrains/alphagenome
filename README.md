@@ -1,130 +1,152 @@
-<img src="./extended-figure-1.png" width="450px"></img>
+# BactaGenome
 
-## AlphaGenome (wip)
+**Bacterial Genome Modeling with AlphaGenome Architecture**
 
-Implementation of [AlphaGenome](https://deepmind.google/discover/blog/alphagenome-ai-for-better-understanding-the-genome/), Deepmind's updated genomic attention model
+BactaGenome is a bacterial-specific adaptation of AlphaGenome's transformer-unet architecture, designed for synthetic biology applications and optimized for the iGEM competition.
 
+## 🧬 Overview
 
-## Appreciation
+BactaGenome adapts AlphaGenome's proven architecture for bacterial sequences, featuring:
 
-- [Miquel Anglada-Girotto](https://github.com/MiqG) for contributing the organism, output embedding, loss functions, and all the splicing prediction heads!
+- **100K bp context window** (10x smaller than AlphaGenome for efficiency)
+- **8 bacterial-specific prediction modalities** for synthetic biology
+- **Multi-species learning** across 7 phylogenetically diverse bacteria
+- **Full-length outputs** for precise genomic engineering
 
-## Install
+## 🚀 Quick Start
+
+### Installation
 
 ```bash
-$ pip install alphagenome-pytorch
+# Clone the repository
+git clone https://github.com/your-username/bactagenome.git
+cd bactagenome
+
+# Create conda environment
+conda create -n bactagenome python=3.9
+conda activate bactagenome
+
+# Install dependencies
+pip install -r requirements.txt
+pip install -e .
 ```
 
-## Usage
-
-The main unet transformer, without any heads
+### Basic Usage
 
 ```python
+from bactagenome import BactaGenome, BactaGenomeConfig
+
+# Create model
+config = BactaGenomeConfig()
+model = BactaGenome(config)
+
+# Add bacterial prediction heads
+model.add_bacterial_heads("E_coli_K12")
+
+# Predict on DNA sequence
 import torch
-from alphagenome_pytorch import AlphaGenome
+sequence = torch.randint(0, 5, (1, 98304))  # 100K bp
+organism_index = torch.tensor([0])  # E. coli
 
-model = AlphaGenome()
-
-dna = torch.randint(0, 5, (2, 8192))
-
-# organism_index - 0 for human, 1 for mouse - can be changed with `num_organisms` on `AlphaGenome`
-
-embeds_1bp, embeds_128bp, embeds_pair = model(dna, organism_index = 0) # (2, 8192, 1536), (2, 64, 3072), (2, 4, 4, 128)
+predictions = model(sequence, organism_index)
+print(predictions.keys())  # Dict of predictions by organism and modality
 ```
 
-Adding all types of output heads (thanks to [@MiqG](https://github.com/MiqG))
-
-```python
-import torch
-from alphagenome_pytorch import AlphaGenome, publication_heads_config
-
-model = AlphaGenome()
-
-model.add_heads(
-    'human',
-    num_tracks_1bp = 10,
-    num_tracks_128bp = 10,
-    num_tracks_contacts = 128,
-    num_splicing_contexts = 64, # 2 strands x num. CURIE conditions
-)
-
-dna = torch.randint(0, 5, (2, 8192))
-
-organism_index = torch.tensor([0, 1]) # the organism that each sequence belongs to
-splice_donor_idx = torch.tensor([[10, 100, 34], [24, 546, 870]])
-splice_acceptor_idx = torch.tensor([[15, 103, 87], [56, 653, 900]])
-
-# get sequence embeddings
-
-embeddings_1bp, embeddings_128bp, embeddings_pair = model(dna, organism_index, return_embeds = True) # (2, 8192, 1536), (2, 64, 3072), (2, 4, 4, 128)
-
-# get track predictions
-
-out = model(
-    dna,
-    organism_index,
-    splice_donor_idx = splice_donor_idx,
-    splice_acceptor_idx = splice_acceptor_idx
-)
-
-for organism, outputs in out.items():
-    for out_head, out_values in outputs.items():
-        print(organism, out_head, out_values.shape)
-
-# human 1bp_tracks torch.Size([2, 8192, 10])
-# human 128bp_tracks torch.Size([2, 64, 10])
-# human contact_head torch.Size([2, 4, 4, 128])
-# human splice_logits torch.Size([2, 8192, 5])
-# human splice_usage torch.Size([2, 8192, 64])
-# human splice_juncs torch.Size([2, 3, 3, 64])
-
-# initialize published AlphaGenome for human and mouse
-model = AlphaGenome()
-model.add_heads(**publication_heads_config['human'])
-model.add_heads(**publication_heads_config['mouse'])
-model.total_parameters # 259,459,534 (vs ~450 million trainable parameters)
-```
-
-## Training
-
-### test minimal architecture
-```shell
-# loss quickly decreases and stabilizes at around 1349651
-# this minimal model (576,444 parameters) can be run with cpu
-
-python train_dummy.py --config_file=configs/dummy.yaml
-```
-
-## Contributing
-
-First install locally with the following
+### Training
 
 ```bash
-$ pip install '.[test]' # or uv pip install . '[test]'
+# Phase 1: Proof of concept (E. coli only)
+python scripts/train.py --config configs/training/phase1.yaml
+
+# Phase 2: Multi-species training  
+python scripts/train.py --config configs/training/phase2.yaml
 ```
 
-Then make your changes, add a test to `tests/test_alphagenome.py`
+## 🧪 Prediction Modalities
 
-```bash
-$ pytest tests
+### Core Expression Control
+1. **Promoter Strength**: Expression levels across conditions
+2. **RBS Efficiency**: Translation initiation rates  
+3. **Operon Co-regulation**: Gene co-expression within operons
+
+### Advanced Regulation
+4. **Riboswitch Binding**: Ligand binding probabilities
+5. **sRNA Targets**: Small RNA interaction predictions
+
+### Systems-Level Features  
+6. **Transcription Termination**: Termination sites and mechanisms
+7. **Pathway Activity**: Metabolic pathway completeness
+8. **Secretion Signals**: Protein secretion system predictions
+
+## 🦠 Supported Species
+
+- **E. coli K-12** (model organism)
+- **B. subtilis 168** (Gram-positive)
+- **Salmonella enterica** (pathogen)
+- **Pseudomonas aeruginosa** (environmental)
+- **Mycobacterium tuberculosis** (high GC)
+- **Streptococcus pyogenes** (pathogen)
+- **Synechocystis sp.** (cyanobacteria)
+
+## 📊 Performance Targets
+
+- **Promoter prediction**: R² ≥ 0.75
+- **RBS efficiency**: R² ≥ 0.80  
+- **Operon prediction**: AUROC ≥ 0.90
+- **Cross-species transfer**: <20% performance drop
+
+## 🛠️ Project Structure
+
+```
+BactaGenome/
+├── bactagenome/           # Main package
+│   ├── model/            # Model architecture
+│   ├── data/             # Data processing
+│   ├── training/         # Training pipeline
+│   └── evaluation/       # Evaluation utilities
+├── configs/              # Configuration files
+├── scripts/              # Utility scripts
+├── data/                 # Data directory
+├── experiments/          # Experiment tracking
+├── models/               # Saved models
+└── docs/                 # Documentation
 ```
 
-That's it
+## 📚 Documentation
 
-Vibe coding with some attention network is totally welcomed, if it works
+- [Model Architecture](docs/model_architecture.md)
+- [Training Guide](docs/training_guide.md)
+- [Data Formats](docs/data_format.md)
 
-## Citations
+## 🏆 iGEM Competition
 
-```bibtex
-@article {avsec2025alphagenome,
-    title = {AlphaGenome: advancing regulatory variant effect prediction with a unified DNA sequence model},
-    author = {Avsec, {\v Z}iga and Latysheva, Natasha and Cheng, Jun and Novati, Guido and Taylor, Kyle R. and Ward, Tom and Bycroft, Clare and Nicolaisen, Lauren and Arvaniti, Eirini and Pan, Joshua and Thomas, Raina and Dutordoir, Vincent and Perino, Matteo and De, Soham and Karollus, Alexander and Gayoso, Adam and Sargeant, Toby and Mottram, Anne and Wong, Lai Hong and Drot{\'a}r, Pavol and Kosiorek, Adam and Senior, Andrew and Tanburn, Richard and Applebaum, Taylor and Basu, Souradeep and Hassabis, Demis and Kohli, Pushmeet},
-    elocation-id = {2025.06.25.661532},
-    year = {2025},
-    doi = {10.1101/2025.06.25.661532},
-    publisher = {Cold Spring Harbor Laboratory},
-    URL = {https://www.biorxiv.org/content/early/2025/06/27/2025.06.25.661532},
-    eprint = {https://www.biorxiv.org/content/early/2025/06/27/2025.06.25.661532.full.pdf},
-    journal = {bioRxiv}
-}
-```
+BactaGenome is designed specifically for iGEM (International Genetically Engineered Machine) competition applications:
+
+- **Pathway Optimization**: Predict and optimize metabolic pathways
+- **Promoter Design**: Engineer promoters with desired expression levels
+- **RBS Tuning**: Design ribosome binding sites for precise translation control
+- **System Integration**: Understand multi-gene system interactions
+
+## 🤝 Contributing
+
+We welcome contributions! Please see our contributing guidelines and code of conduct.
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## 🙏 Acknowledgments
+
+- Based on [AlphaGenome](https://github.com/lucidrains/alphagenome-pytorch) by Lucid Rains
+- Inspired by DeepMind's AlphaFold architecture
+- Bacterial datasets from RegulonDB, BioCyc, and other public resources
+
+## 📞 Contact
+
+- **Team**: BactaGenome Team
+- **Email**: bactagenome@example.com
+- **iGEM Team**: [Your iGEM Team Name]
+
+---
+
+*Built with ❤️ for the synthetic biology community*

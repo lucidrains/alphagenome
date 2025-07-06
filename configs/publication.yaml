@@ -17,7 +17,7 @@ model:
   dna_embed_width: 15
   num_organisms: 2
   transformer_kwargs:
-    depth: 8
+    depth: 9
     heads: 8
     dim_head_qk: 128
     dim_head_v: 192

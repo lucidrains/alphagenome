@@ -1,0 +1,73 @@
+# bactagenome Base Model Configuration
+model:
+  name: "bactagenome_base"
+  
+  # Architecture parameters
+  dims: [768, 896, 1024, 1152, 1280, 1408, 1536]
+  basepairs: 5
+  dna_embed_width: 15
+  num_organisms: 7
+  
+  # Context and output dimensions
+  context_length: 98304  # 100K bp
+  output_1bp_bins: 98304  # Full length output
+  output_128bp_bins: 768  # 98304/128
+  pairwise_size: 48       # 98304/2048
+  
+  # Transformer configuration
+  transformer:
+    depth: 9
+    heads: 8
+    dim_head_qk: 128
+    dim_head_v: 192
+    dropout: 0.1
+    ff_expansion_factor: 2.0
+    max_positions: 8192  # Sufficient for 100K context
+    dim_pairwise: 128
+    pairwise_every_num_single_blocks: 2
+    single_to_pairwise_heads: 32
+    pool_size: 16
+
+# Organism specifications
+organisms:
+  E_coli_K12:
+    num_conditions: 50
+    num_pathways: 100
+    num_srnas: 200
+    num_secretion_types: 8
+    
+  B_subtilis_168:
+    num_conditions: 40
+    num_pathways: 80
+    num_srnas: 150
+    num_secretion_types: 6
+    
+  Salmonella_enterica:
+    num_conditions: 45
+    num_pathways: 90
+    num_srnas: 180
+    num_secretion_types: 7
+    
+  Pseudomonas_aeruginosa:
+    num_conditions: 35
+    num_pathways: 85
+    num_srnas: 160
+    num_secretion_types: 8
+    
+  Mycobacterium_tuberculosis:
+    num_conditions: 30
+    num_pathways: 70
+    num_srnas: 120
+    num_secretion_types: 5
+    
+  Streptococcus_pyogenes:
+    num_conditions: 25
+    num_pathways: 60
+    num_srnas: 100
+    num_secretion_types: 4
+    
+  Synechocystis_sp:
+    num_conditions: 20
+    num_pathways: 75
+    num_srnas: 90
+    num_secretion_types: 3
