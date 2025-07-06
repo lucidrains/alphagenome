@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+os.environ['CUDA_VISIBLE_DEVICES'] = '7'  
 import yaml
 import random
 import numpy as np
@@ -22,7 +23,7 @@ def exists(v):
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config_file", type=str)
+    parser.add_argument("--config_file", type=str, default=r"/home/yunuo/projectnvme/MotifBERT/BactaGenome/configs/dummy.yaml")
     args = parser.parse_args()
     return args
     

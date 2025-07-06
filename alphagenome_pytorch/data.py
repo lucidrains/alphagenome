@@ -27,8 +27,8 @@ class DummyTargetsDataset(Dataset):
                 'target_contact_head': torch.rand(self.dim_contacts, self.dim_contacts, config['num_tracks_contacts']).clamp(min=0.01),
                 'target_splice_probs': torch.nn.functional.one_hot(torch.randint(0, self.n_splice_site_types, (self.len_1bp,)), num_classes=self.n_splice_site_types).float(),
                 'target_splice_usage': torch.bernoulli(torch.rand(self.len_1bp, config['num_splicing_contexts'])),
-                'target_splice_juncs': torch.abs(torch.randn(self.n_splice_sites, self.n_splice_sites, config['num_splicing_contexts'])).clamp(min=0.01)
-
+                'target_splice_juncs': torch.abs(torch.randn(self.n_splice_sites, self.n_splice_sites, config['num_splicing_contexts'])).clamp(min=0.01),
+                'target_splice_logits': torch.randn(self.len_1bp, self.n_splice_site_types).clamp(min=0.01)
             }
         
         return item
