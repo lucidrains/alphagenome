@@ -1,0 +1,59 @@
+# Dummy training configuration for BactaGenome
+# This configuration is for testing the training pipeline with synthetic data
+
+# Model configuration - Small model for testing
+model:
+  dims: [768, 896, 1024, 1152, 1280, 1408, 1536]  # Small U-Net dimensions
+  context_length: 98304  # Small context for testing
+  num_organisms: 1  # Phase 1: E. coli only
+  transformer_kwargs:
+    depth: 9  # Very shallow for testing
+    heads: 8
+    dim_head_qk: 128  # Smaller dimensions
+    dim_head_v: 192
+    dropout: 0.1
+    ff_expansion_factor: 2.0
+    max_positions: 768  # Must be >= context_length/16 = 128
+    dim_pairwise: 48
+    pairwise_every_num_single_blocks: 2
+    single_to_pairwise_heads: 8  # Reduced
+    pool_size: 16
+
+# Data configuration
+data:
+  seq_len: 98304  # Must match model.context_length
+  num_train_samples: 100  # Very small for testing
+  num_val_samples: 20
+
+# Training configuration
+training:
+  epochs: 10  # Quick test
+  batch_size: 4  # Very small batch for testing
+  learning_rate: 1e-4
+  weight_decay: 1e-5
+  seed: 42
+  num_workers: 0  # Single-threaded for testing
+  
+  # Intervals
+  val_interval: 1  # Validate every epoch for testing
+  checkpoint_interval: 10  # Reduce checkpointing frequency
+  log_interval: 5  # More frequent logging for testing
+  
+  # Directories
+  checkpoint_dir: "./checkpoints"
+  log_dir: "./logs"
+  
+  # Advanced training options
+  gradient_accumulation_steps: 1
+  mixed_precision: "no"  # Can be "fp16", "bf16", or "no"
+  use_wandb: false
+  
+  # Loss weights for Phase 1 modalities only
+  loss_weights:
+    promoter_strength: 1.0      # Phase 1 Head 1
+    rbs_efficiency: 1.0         # Phase 1 Head 2
+    operon_coregulation: 1.0    # Phase 1 Head 3
+
+# Organism list - Phase 1 focuses on E. coli only
+organisms:
+  - "E_coli_K12"
