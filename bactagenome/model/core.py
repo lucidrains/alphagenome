@@ -71,10 +71,10 @@ class BactaGenome(nn.Module):
             self.config.num_organisms
         )
         
-        # Dimensions for heads
+        # Dimensions for heads (after output embedding doubles them)
         self.num_organisms = self.config.num_organisms
-        self.dim_1bp = 2 * last_dim  # After output embedding
-        self.dim_128bp = 2 * last_dim
+        self.dim_1bp = 2 * first_dim  # After output embedding: 2 * 64 = 128
+        self.dim_128bp = 2 * last_dim  # After output embedding: 2 * 96 = 192
         self.dim_contacts = self.transformer_unet.transformer.dim_pairwise
         
         # Bacterial-specific prediction heads
@@ -117,34 +117,16 @@ class BactaGenome(nn.Module):
         self.head_forward_arg_maps[organism][head_name] = head_forward_arg_map
     
     def add_bacterial_heads(self, organism: str):
-        """Add all bacterial-specific prediction heads for an organism"""
-        head_spec = self.config.get_head_spec(organism)
+        """Add Phase 1 bacterial-specific prediction heads for an organism"""
         
+        # Phase 1: Only 3 core heads for proof of concept
         bacterial_heads = [
-            # Core expression control
             ("promoter_strength", PromoterStrengthHead(
-                self.dim_1bp, self.dim_128bp, head_spec["num_conditions"]
+                self.dim_1bp, self.dim_128bp, num_conditions=10  # Simplified
             )),
             ("rbs_efficiency", RBSEfficiencyHead(self.dim_1bp)),
             ("operon_coregulation", OperonCoregulationHead(
-                self.dim_128bp, self.dim_contacts, head_spec["num_conditions"]
-            )),
-            
-            # Advanced regulation
-            ("riboswitch_binding", RiboswitchBindingHead(
-                self.dim_1bp, self.dim_128bp, num_ligands=20
-            )),
-            ("srna_target", SRNATargetHead(
-                self.dim_1bp, self.dim_128bp, head_spec["num_srnas"]
-            )),
-            
-            # Systems-level features
-            ("termination", TerminationHead(self.dim_1bp)),
-            ("pathway_activity", PathwayActivityHead(
-                self.dim_128bp, self.dim_contacts, head_spec["num_pathways"]
-            )),
-            ("secretion_signal", SecretionSignalHead(
-                self.dim_1bp, head_spec["num_secretion_types"]
+                self.dim_128bp, self.dim_contacts, num_genes=5  # Simplified
             )),
         ]
         
