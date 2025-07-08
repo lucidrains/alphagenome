@@ -10,8 +10,8 @@ import numpy as np
 import logging
 from pathlib import Path
 
-os.environ['CUDA_VISIBLE_DEVICES'] = '7'
-os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
+#os.environ['CUDA_VISIBLE_DEVICES'] = '4,5,6'  # Set visible GPUs for training
+#os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
 
 import torch
 import torch.nn as nn

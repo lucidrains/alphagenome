@@ -254,7 +254,7 @@ def get_maybe_dist_var(
     numel = tensor(t[..., 0].numel(), device=device)
     dist.all_reduce(numel)
 
-    summed = stats.sum(dim=0)
+    summed = t.sum(dim=0)
     dist.all_reduce(summed)
 
     mean = summed / numel
