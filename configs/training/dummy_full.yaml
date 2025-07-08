@@ -19,6 +19,19 @@ model:
     single_to_pairwise_heads: 8  # Reduced
     pool_size: 16
 
+  # transformer_kwargs:
+  #   depth: 4
+  #   heads: 4
+  #   dim_head_qk: 64
+  #   dim_head_v: 64
+  #   dropout: 0.1
+  #   ff_expansion_factor: 2.0
+  #   max_positions: 512
+  #   dim_pairwise: 32
+  #   pairwise_every_num_single_blocks: 2
+  #   single_to_pairwise_heads: 4
+  #   pool_size: 8
+
 # Data configuration
 data:
   seq_len: 98304  # Must match model.context_length
@@ -33,6 +46,7 @@ training:
   weight_decay: 1e-5
   seed: 42
   num_workers: 0  # Single-threaded for testing
+  #mixed_precision: "fp16"  
   
   # Intervals
   val_interval: 1  # Validate every epoch for testing
@@ -45,7 +59,7 @@ training:
   
   # Advanced training options
   gradient_accumulation_steps: 1
-  mixed_precision: "no"  # Can be "fp16", "bf16", or "no"
+  mixed_precision: "fp16"  # Can be "fp16", "bf16", or "no"
   use_wandb: false
   
   # Loss weights for Phase 1 modalities only
