@@ -306,7 +306,7 @@ def setup_logging():
 def parse_args():
     """Parse command line arguments"""
     parser = argparse.ArgumentParser(description="Train BactaGenome model")
-    parser.add_argument("--config", type=str, default="configs/training/dummy_full.yaml",
+    parser.add_argument("--config", type=str, default="configs/training/dummy.yaml",
                         help="Path to configuration file")
     parser.add_argument("--resume", type=str, default=None,
                         help="Path to checkpoint to resume from")
