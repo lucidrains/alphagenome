@@ -30,7 +30,7 @@ from einops import rearrange, repeat, reduce, einsum
 LinearNoBias = partial(Linear, bias = False)
 
 TransformerUnetOutput = namedtuple('TransformerUnetOutput', [
-    'output',
+    'unet_output',
     'single_repr',
     'pairwise_repr'
 ])
@@ -1388,12 +1388,15 @@ class AlphaGenome(Module):
     def get_embeds(
         self,
         seq, # Int['b n']
-        organism_index
+        organism_index,
+        return_unet_transformer_outputs = False
     ):
 
         organism_embed = self.organism_embed(organism_index)
 
-        unet_out, single, pairwise = self.transformer_unet(seq, pre_attend_embed = organism_embed)
+        unet_transformer_out = self.transformer_unet(seq, pre_attend_embed = organism_embed)
+
+        unet_out, single, pairwise = unet_transformer_out
 
         # embed organism to outputs
 
@@ -1401,7 +1404,12 @@ class AlphaGenome(Module):
         embeds_1bp = self.outembed_1bp(unet_out, organism_index, embeds_128bp)
         embeds_pair = self.outembed_pair(pairwise, organism_index)
 
-        return Embeds(embeds_1bp, embeds_128bp, embeds_pair)
+        embeds = Embeds(embeds_1bp, embeds_128bp, embeds_pair)
+
+        if not return_unet_transformer_outputs:
+            return embeds
+
+        return embeds, unet_transformer_out
     
     def forward(
         self,
@@ -1419,7 +1427,7 @@ class AlphaGenome(Module):
 
         # process sequence
         
-        embeds = self.get_embeds(seq, organism_index)
+        embeds, unet_transformer_out = self.get_embeds(seq, organism_index, return_unet_transformer_outputs = True)
 
         # early return embeds, if specified
 
@@ -1435,6 +1443,9 @@ class AlphaGenome(Module):
             embeds_128bp = embeds_128bp,
             embeds_pair = embeds_pair,
             organism_index = organism_index,
+            unet_output = unet_transformer_out.unet_output,
+            single_repr = unet_transformer_out.single_repr,
+            pairwise_repr = unet_transformer_out.pairwise_repr,
         )
 
         assert is_disjoint(set(head_inputs.keys()), set(head_kwargs.keys()))
