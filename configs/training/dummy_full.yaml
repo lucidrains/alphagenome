@@ -59,7 +59,7 @@ training:
   
   # Advanced training options
   gradient_accumulation_steps: 1
-  mixed_precision: "fp16"  # Can be "fp16", "bf16", or "no"
+  mixed_precision: "no"  # Can be "fp16", "bf16", or "no"
   use_wandb: false
   
   # Loss weights for Phase 1 modalities only
