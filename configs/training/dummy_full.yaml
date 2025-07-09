@@ -41,7 +41,7 @@ data:
 # Training configuration
 training:
   epochs: 10  # Quick test
-  batch_size: 4  # Very small batch for testing
+  batch_size: 1  # Very small batch for testing
   learning_rate: 1e-4
   weight_decay: 1e-5
   seed: 42

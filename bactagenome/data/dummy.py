@@ -26,7 +26,7 @@ class DummyBacterialTargetsDataset(Dataset):
         self.len_1bp = seq_len
         # Note: The model actually outputs at ~8bp resolution (2048 -> 256), not 128bp
         # This is due to the U-Net architecture downsampling factor
-        self.len_128bp = seq_len // 8  # 2048 // 8 = 256
+        self.len_128bp = seq_len // 128  # 2048 // 8 = 256
         
     def __len__(self):
         return 1000  # Dummy dataset size
