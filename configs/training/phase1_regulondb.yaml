@@ -1,0 +1,112 @@
+# Phase 1 Training Configuration for RegulonDB Data
+# BactaGenome: E. coli K-12 with real RegulonDB data
+
+# Model architecture - optimized for Phase 1
+model:
+  dims: [768, 896, 1024, 1152, 1280, 1408, 1536]  # U-Net channel dimensions
+  context_length: 98304                             # 100K bp sequences (AlphaGenome style)
+  num_organisms: 1                                  # Phase 1: E. coli only
+  
+  # Transformer hyperparameters (must match TransformerTower.__init__)
+  transformer_kwargs:
+    depth: 9                                        # AlphaGenome-like depth
+    heads: 8                                        # Attention heads
+    dim_head_qk: 128                               # Query/Key head dimension
+    dim_head_v: 192                                # Value head dimension
+    dropout: 0.1                                   # Dropout rate
+    max_positions: 8192                            # Max sequence positions
+
+# Training hyperparameters - real data optimized
+training:
+  epochs: 50                                       # More epochs for real data
+  batch_size: 4                                    # Smaller batch due to large sequences
+  learning_rate: 1e-4                             # Conservative learning rate
+  weight_decay: 0.01                              # L2 regularization
+  gradient_accumulation_steps: 4                   # Effective batch size = 16
+  mixed_precision: "fp16"                          # Memory optimization
+  
+  # Loss weights - Phase 1 modalities only (AlphaGenome style: no extra weighting)
+  loss_weights:
+    promoter_strength: 1.0                         # Core expression prediction
+    rbs_efficiency: 1.0                           # Translation efficiency
+    operon_coregulation: 1.0                      # Gene co-regulation
+  
+  # Training schedule
+  val_interval: 5                                  # Validate every 5 epochs
+  checkpoint_interval: 10                          # Save checkpoint every 10 epochs
+  log_interval: 10                                 # Log every 10 steps
+  
+  # Optimization
+  warmup_steps: 500                                # Warmup schedule
+  scheduler: "cosine"                              # Learning rate schedule
+  
+  # Hardware and performance
+  num_workers: 2                                   # Data loading workers
+  use_wandb: false                                 # Weights & Biases logging
+  
+  # Directories
+  checkpoint_dir: "checkpoints/phase1_regulondb"
+  log_dir: "logs/phase1_regulondb"
+  
+  # Reproducibility
+  seed: 42
+
+# Data configuration
+data:
+  seq_len: 98304                                   # Must match model.context_length
+  
+  # Data processing
+  window_overlap: 0.1                              # 10% overlap between windows
+  min_genes_per_window: 1                          # Minimum genes for valid window
+  
+  # Chromosome-based cross-validation (following plan.md)
+  cv_strategy: "chromosome_based"
+  train_angles: [0, 270]                           # 0° to 270° for training
+  val_angles: [270, 360]                           # 270° to 360° for validation
+
+# Target organisms for Phase 1
+organisms:
+  - "E_coli_K12"                                   # Phase 1: single organism
+
+# Phase indicator
+phase: 1
+
+# RegulonDB specific settings
+regulondb:
+  # Expression data
+  max_conditions: 50                               # Limit expression conditions
+  expression_threshold: 0.1                       # Minimum expression level
+  
+  # Gene filtering
+  min_gene_length: 100                             # Minimum gene length (bp)
+  max_gene_length: 5000                            # Maximum gene length (bp)
+  
+  # Operon filtering  
+  min_operon_genes: 2                              # Minimum genes per operon
+  max_operon_length: 10000                         # Maximum operon length (bp)
+  
+  # Data quality
+  require_sequence: true                           # Require gene sequences
+  require_expression: false                        # Don't require expression (many genes lack it)
+  
+  # Co-expression tracks
+  num_coexpression_tracks: 20                      # Number of co-expression patterns
+
+# Performance targets (from plan.md)
+targets:
+  promoter_prediction_r2: 0.75                    # R² ≥ 0.75
+  rbs_efficiency_r2: 0.80                         # R² ≥ 0.80  
+  operon_prediction_auroc: 0.90                   # AUROC ≥ 0.90
+  
+# Hardware requirements
+hardware:
+  min_gpu_memory: "40GB"                           # Minimum GPU memory
+  recommended_gpus: 4                              # A800 × 4 from plan.md
+  estimated_training_time: "2-3 days"             # From plan.md
+
+# Success criteria for Phase 1
+success_criteria:
+  - "Stable training convergence"
+  - "Promoter/RBS prediction R² > 0.7"
+  - "Training pipeline validation"
+  - "Model ready for Phase 2 expansion"
