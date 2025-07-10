@@ -1,162 +1,276 @@
 """
 Loss functions for bacterial genome modeling
+Based on AlphaGenome loss function patterns adapted for bacterial data
 """
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 
-class PromoterLoss(nn.Module):
-    """Loss for promoter strength prediction"""
+def soft_clip(x: torch.Tensor, threshold: float = 10.0) -> torch.Tensor:
+    """
+    AlphaGenome-style soft clipping for numerical stability
+    """
+    return torch.where(x > threshold, 2 * torch.sqrt(x * threshold) - threshold, x)
+
+
+def multinomial_loss(
+    pred: torch.Tensor, 
+    target: torch.Tensor, 
+    multinomial_resolution: int,
+    segment_weight: float = 5.0
+) -> torch.Tensor:
+    """
+    AlphaGenome-style multinomial loss over segments
     
-    def __init__(self, multinomial_weight: float = 1.0, poisson_weight: float = 0.1):
+    Args:
+        pred: [batch, seq_len, tracks] - Predictions
+        target: [batch, seq_len, tracks] - Targets  
+        multinomial_resolution: Size of each segment
+        segment_weight: Weight for multinomial component (default 5.0 like AlphaGenome)
+    
+    Returns:
+        Combined Poisson + Multinomial loss
+    """
+    # Reshape into segments
+    batch_size, seq_len, tracks = pred.shape
+    num_segments = seq_len // multinomial_resolution
+    
+    if num_segments == 0:
+        # Fallback for short sequences
+        return F.poisson_nll_loss(pred.sum(dim=1), target.sum(dim=1), log_input=False)
+    
+    # Reshape to [batch, num_segments, segment_size, tracks]
+    pred_segments = pred[:, :num_segments * multinomial_resolution].reshape(
+        batch_size, num_segments, multinomial_resolution, tracks
+    )
+    target_segments = target[:, :num_segments * multinomial_resolution].reshape(
+        batch_size, num_segments, multinomial_resolution, tracks
+    )
+    
+    # Sum over each segment: [batch, num_segments, tracks]
+    sum_pred = pred_segments.sum(dim=2)
+    sum_target = target_segments.sum(dim=2)
+    
+    # Poisson loss on segment sums (encourages correct total counts)
+    poisson_loss = F.poisson_nll_loss(
+        sum_pred.flatten(), 
+        sum_target.flatten(), 
+        log_input=False,
+        reduction='mean'
+    )
+    poisson_loss = poisson_loss / multinomial_resolution  # Scale by segment size
+    
+    # Multinomial loss on distributions within segments (encourages correct shape)
+    pred_probs = pred_segments / (sum_pred.unsqueeze(2) + 1e-7)  # Normalize to probabilities
+    multinomial_nll = -(target_segments * torch.log(pred_probs + 1e-7)).sum()
+    multinomial_loss = multinomial_nll / (batch_size * num_segments * tracks)
+    
+    return poisson_loss + segment_weight * multinomial_loss
+
+
+class PromoterStrengthLoss(nn.Module):
+    """
+    Promoter strength prediction loss - AlphaGenome style
+    
+    Based on AlphaGenome's RNA-seq loss: Poisson + Multinomial over segments
+    Adapted for bacterial gene expression across conditions
+    """
+    
+    def __init__(self, multinomial_resolution: int = 217, segment_weight: float = 5.0):
         super().__init__()
-        self.multinomial_weight = multinomial_weight
-        self.poisson_weight = poisson_weight
+        self.multinomial_resolution = multinomial_resolution
+        self.segment_weight = segment_weight
     
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            pred: [batch, seq_len, num_conditions]
-            target: [batch, seq_len, num_conditions]
+            pred: [batch, seq_len, num_conditions] - Predicted expression levels
+            target: [batch, seq_len, num_conditions] - Target expression levels
+        
+        Returns:
+            Combined loss encouraging correct counts and spatial distribution
         """
-        # Multinomial loss for ratios
-        pred_ratios = F.softmax(pred, dim=-1)
-        target_ratios = F.softmax(target, dim=-1)
-        multinomial_loss = F.kl_div(pred_ratios.log(), target_ratios, reduction='batchmean')
-        
-        # Poisson loss for counts
-        pred_counts = pred.sum(dim=-1)
-        target_counts = target.sum(dim=-1)
-        poisson_loss = F.poisson_nll_loss(pred_counts, target_counts, log_input=False)
-        
-        return self.multinomial_weight * multinomial_loss + self.poisson_weight * poisson_loss
+        return multinomial_loss(pred, target, self.multinomial_resolution, self.segment_weight)
 
 
-class RBSLoss(nn.Module):
-    """Loss for RBS efficiency prediction"""
+class RBSEfficiencyLoss(nn.Module):
+    """
+    RBS efficiency prediction loss
+    
+    MSE on log-transformed efficiency ratios (similar to AlphaGenome scaling)
+    """
+    
+    def __init__(self):
+        super().__init__()
     
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            pred: [batch, seq_len, 1]
-            target: [batch, seq_len, 1]
+            pred: [batch, seq_len, 1] - Predicted RBS efficiency
+            target: [batch, seq_len, 1] - Target RBS efficiency
+        
+        Returns:
+            MSE loss on log-transformed values
         """
-        # MSE on log-transformed efficiency ratios
-        log_pred = torch.log(pred + 1e-8)
-        log_target = torch.log(target + 1e-8)
+        # Log transform for better numerical properties
+        log_pred = torch.log(pred + 1e-7)
+        log_target = torch.log(target + 1e-7)
+        
         return F.mse_loss(log_pred, log_target)
 
 
-class OperonLoss(nn.Module):
-    """Loss for operon co-regulation prediction"""
+class OperonCoregulationLoss(nn.Module):
+    """
+    Operon co-regulation prediction loss
+    
+    Uses AlphaGenome-style multinomial loss for co-expression tracks
+    """
+    
+    def __init__(self, multinomial_resolution: int = 128):
+        super().__init__()
+        self.multinomial_resolution = multinomial_resolution
     
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            pred: [batch, seq_len, num_genes]
-            target: [batch, seq_len, num_genes]
+            pred: [batch, seq_len//128, num_tracks] - Predicted co-expression
+            target: [batch, seq_len//128, num_tracks] - Target co-expression
+        
+        Returns:
+            Multinomial loss for co-expression patterns
         """
-        # Correlation loss between genes in same operon
-        pred_norm = F.normalize(pred, p=2, dim=1)
-        target_norm = F.normalize(target, p=2, dim=1)
-        
-        # Compute correlation matrices
-        pred_corr = torch.bmm(pred_norm.transpose(1, 2), pred_norm)
-        target_corr = torch.bmm(target_norm.transpose(1, 2), target_norm)
-        
-        return F.mse_loss(pred_corr, target_corr)
+        # Use smaller resolution for gene-level features
+        resolution = min(self.multinomial_resolution, pred.shape[1])
+        return multinomial_loss(pred, target, resolution, segment_weight=5.0)
 
 
-class RiboswitchLoss(nn.Module):
-    """Loss for riboswitch binding prediction"""
+# Advanced regulation losses (Phase 2)
+
+class RiboswitchBindingLoss(nn.Module):
+    """
+    Riboswitch ligand binding prediction loss
+    Binary cross-entropy for binding probabilities
+    """
     
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            pred: [batch, seq_len, num_ligands]
-            target: [batch, seq_len, num_ligands]
+            pred: [batch, seq_len, num_ligands] - Predicted binding probabilities
+            target: [batch, seq_len, num_ligands] - Target binding labels
         """
         return F.binary_cross_entropy(pred, target)
 
 
-class SRNALoss(nn.Module):
-    """Loss for sRNA target prediction"""
+class SRNATargetLoss(nn.Module):
+    """
+    sRNA target prediction loss
+    Ranking loss for target prioritization (following AlphaGenome's approach to ordering)
+    """
     
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            pred: [batch, seq_len, num_srnas]
-            target: [batch, seq_len, num_srnas]
+            pred: [batch, seq_len, num_srnas] - Predicted interaction strength
+            target: [batch, seq_len, num_srnas] - Target interaction strength
         """
-        # Ranking loss for target prioritization
+        # Use MSE as ranking loss proxy (higher scores = stronger interactions)
         return F.mse_loss(pred, target)
 
 
+# Systems-level losses (Phase 3)
+
 class TerminationLoss(nn.Module):
-    """Loss for transcription termination prediction"""
+    """
+    Transcription termination prediction loss
+    Cross-entropy for termination type classification
+    """
     
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            pred: [batch, seq_len, 3]
-            target: [batch, seq_len, 3]
+            pred: [batch, seq_len, 3] - Predicted termination probabilities
+            target: [batch, seq_len, 3] - Target termination labels (one-hot)
         """
-        return F.cross_entropy(pred.view(-1, 3), target.view(-1, 3).argmax(dim=-1))
+        pred_flat = pred.view(-1, pred.shape[-1])
+        target_flat = target.view(-1, target.shape[-1])
+        
+        # Convert one-hot to class indices
+        target_indices = target_flat.argmax(dim=-1)
+        
+        return F.cross_entropy(pred_flat, target_indices)
 
 
-class PathwayLoss(nn.Module):
-    """Loss for pathway activity prediction"""
+class PathwayActivityLoss(nn.Module):
+    """
+    Pathway activity prediction loss
+    Binary cross-entropy for pathway completeness
+    """
     
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            pred: [batch, num_pathways]
-            target: [batch, num_pathways]
+            pred: [batch, num_pathways] - Predicted pathway activity
+            target: [batch, num_pathways] - Target pathway activity
         """
         return F.binary_cross_entropy(pred, target)
 
 
-class SecretionLoss(nn.Module):
-    """Loss for secretion signal prediction"""
+class SecretionSignalLoss(nn.Module):
+    """
+    Secretion signal prediction loss
+    Multi-label binary cross-entropy for secretion systems
+    """
     
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            pred: [batch, seq_len, num_secretion_types]
-            target: [batch, seq_len, num_secretion_types]
+            pred: [batch, seq_len, num_secretion_types] - Predicted secretion probabilities
+            target: [batch, seq_len, num_secretion_types] - Target secretion labels
         """
         return F.binary_cross_entropy(pred, target)
 
 
-class BacterialLossCollection(nn.Module):
-    """Collection of all bacterial-specific losses"""
+class BacterialLossFunction(nn.Module):
+    """
+    Complete loss function for bacterial genome modeling
     
-    def __init__(self, loss_weights: Dict[str, float] = None):
+    Combines all modality-specific losses with AlphaGenome-style weighting
+    (AlphaGenome uses uniform weighting across all heads - no additional coefficients)
+    """
+    
+    def __init__(self, loss_weights: Optional[Dict[str, float]] = None):
         super().__init__()
         
+        # Default weights: Phase 1 modalities weighted higher
         self.loss_weights = loss_weights or {
+            # Phase 1: Core expression control (full weight)
             'promoter_strength': 1.0,
-            'rbs_efficiency': 1.0,
+            'rbs_efficiency': 1.0, 
             'operon_coregulation': 1.0,
-            'riboswitch_binding': 0.5,
-            'srna_target': 0.5,
-            'termination': 0.5,
-            'pathway_activity': 0.5,
-            'secretion_signal': 0.5,
+            
+            # Phase 2: Advanced regulation (reduced weight)
+            'riboswitch_binding': 0.8,
+            'srna_targets': 0.8,
+            
+            # Phase 3: Systems-level (full weight)
+            'transcription_termination': 1.0,
+            'pathway_activity': 1.0,
+            'secretion_signals': 1.0,
         }
         
-        self.losses = nn.ModuleDict({
-            'promoter_strength': PromoterLoss(),
-            'rbs_efficiency': RBSLoss(),
-            'operon_coregulation': OperonLoss(),
-            'riboswitch_binding': RiboswitchLoss(),
-            'srna_target': SRNALoss(),
-            'termination': TerminationLoss(),
-            'pathway_activity': PathwayLoss(),
-            'secretion_signal': SecretionLoss(),
+        # Loss function registry
+        self.loss_functions = nn.ModuleDict({
+            'promoter_strength': PromoterStrengthLoss(),
+            'rbs_efficiency': RBSEfficiencyLoss(),
+            'operon_coregulation': OperonCoregulationLoss(),
+            'riboswitch_binding': RiboswitchBindingLoss(),
+            'srna_targets': SRNATargetLoss(),
+            'transcription_termination': TerminationLoss(),
+            'pathway_activity': PathwayActivityLoss(),
+            'secretion_signals': SecretionSignalLoss(),
         })
     
     def forward(
@@ -165,35 +279,54 @@ class BacterialLossCollection(nn.Module):
         targets: Dict[str, Dict[str, torch.Tensor]]
     ) -> Dict[str, torch.Tensor]:
         """
-        Compute losses for all modalities
+        Compute losses for all active modalities
         
         Args:
             predictions: Nested dict [organism][modality] -> tensor
             targets: Nested dict [organism][modality] -> tensor
         
         Returns:
-            Dictionary of losses by modality
+            Dictionary containing:
+            - Individual modality losses
+            - Total weighted loss
         """
-        total_losses = {}
+        modality_losses = {}
+        total_loss = 0.0
         
         for organism in predictions:
+            if organism not in targets:
+                continue
+                
             for modality, pred in predictions[organism].items():
                 if modality not in targets[organism]:
                     continue
                 
+                if modality not in self.loss_functions:
+                    continue
+                
+                # Compute modality-specific loss
                 target = targets[organism][modality]
-                loss_fn = self.losses[modality]
+                loss_fn = self.loss_functions[modality]
                 loss = loss_fn(pred, target)
                 
-                # Weight the loss
-                weighted_loss = loss * self.loss_weights[modality]
+                # Apply weighting
+                weight = self.loss_weights.get(modality, 1.0)
+                weighted_loss = loss * weight
                 
-                if modality not in total_losses:
-                    total_losses[modality] = weighted_loss
+                # Accumulate losses
+                if modality in modality_losses:
+                    modality_losses[modality] += weighted_loss
                 else:
-                    total_losses[modality] += weighted_loss
+                    modality_losses[modality] = weighted_loss
+                
+                total_loss += weighted_loss
         
-        # Add total loss
-        total_losses['total'] = sum(total_losses.values())
+        # Return all losses for monitoring
+        result = modality_losses.copy()
+        result['total_loss'] = total_loss
         
-        return total_losses
+        return result
+
+
+# Alias for backward compatibility
+BacterialLossCollection = BacterialLossFunction
