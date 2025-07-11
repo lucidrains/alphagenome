@@ -34,7 +34,8 @@ class RegulonDBDataset(Dataset):
         organism_name: str = "E_coli_K12",
         split: str = "train",
         process_if_missing: bool = True,
-        regulondb_raw_path: Optional[str] = None
+        regulondb_raw_path: Optional[str] = None,
+        genome_fasta_path: Optional[str] = None
     ):
         """
         Initialize RegulonDB dataset
@@ -47,15 +48,22 @@ class RegulonDBDataset(Dataset):
             split: Dataset split ('train', 'val', 'test')
             process_if_missing: Whether to process raw data if processed data missing
             regulondb_raw_path: Path to raw RegulonDB BSON files
+            genome_fasta_path: Path to E. coli genome FASTA file for real sequences
         """
         self.data_dir = Path(data_dir)
         self.seq_len = seq_len
         self.num_organisms = num_organisms
         self.organism_name = organism_name
         self.split = split
+        self.genome_fasta_path = genome_fasta_path
         
         # DNA encoding
         self.dna_to_int = {'A': 0, 'T': 1, 'G': 2, 'C': 3, 'N': 4}
+        
+        # Load genome sequence if available
+        self.genome_sequence = None
+        if self.genome_fasta_path:
+            self._load_genome_sequence()
         
         # Load or process data
         self._load_data(process_if_missing, regulondb_raw_path)
@@ -101,6 +109,29 @@ class RegulonDBDataset(Dataset):
                 f"Processed data not found in {self.data_dir} and process_if_missing=False. "
                 f"Either provide processed data or set process_if_missing=True with regulondb_raw_path."
             )
+    
+    def _load_genome_sequence(self):
+        """Load genome sequence from FASTA file"""
+        logger.info(f"Loading genome sequence from {self.genome_fasta_path}")
+        
+        try:
+            with open(self.genome_fasta_path, 'r') as f:
+                lines = f.readlines()
+            
+            # Skip header line and concatenate sequence lines
+            sequence_lines = [line.strip() for line in lines[1:] if line.strip()]
+            self.genome_sequence = ''.join(sequence_lines).upper()
+            
+            logger.info(f"Loaded genome sequence of length {len(self.genome_sequence)} bp")
+            
+            # Verify it matches expected E. coli genome length
+            if len(self.genome_sequence) != 4641652:
+                logger.warning(f"Genome length {len(self.genome_sequence)} doesn't match expected E. coli K-12 length (4641652 bp)")
+            
+        except Exception as e:
+            logger.error(f"Error loading genome sequence: {e}")
+            logger.warning("Will use synthetic sequences instead")
+            self.genome_sequence = None
     
     def _create_splits(self):
         """Create train/validation/test splits using chromosome-based method"""
@@ -151,38 +182,69 @@ class RegulonDBDataset(Dataset):
         """
         Generate DNA sequence for a genomic window
         
-        For now, creates a realistic synthetic sequence based on E. coli GC content
-        In production, this would load the actual E. coli genome sequence
+        Uses real E. coli genome sequence if available, otherwise creates synthetic sequence
         """
         
-        # E. coli has ~50.8% GC content
-        gc_content = 0.508
-        
-        # Generate sequence with appropriate base composition
-        probs = np.array([
-            (1 - gc_content) / 2,  # A
-            (1 - gc_content) / 2,  # T  
-            gc_content / 2,        # G
-            gc_content / 2         # C
-        ])
-        
-        # Generate random sequence with E. coli-like composition
-        sequence_ints = np.random.choice(4, size=self.seq_len, p=probs)
-        
-        # Add some realistic patterns around genes
-        for gene in window['genes']:
-            gene_start = gene['relative_start']
-            gene_end = gene['relative_end']
+        if self.genome_sequence is not None:
+            logger.debug("Using actual genome sequence")
+
+            # Extract real sequence from genome
+            start_pos = window['genomic_start']
+            end_pos = window['genomic_end']
             
-            # Add AT-rich promoter region upstream of genes
-            promoter_start = max(0, gene_start - 100)
-            promoter_end = gene_start
+            # Handle circular genome - E. coli chromosome is circular
+            if end_pos <= len(self.genome_sequence):
+                # Normal case - window fits within genome
+                sequence_str = self.genome_sequence[start_pos:end_pos]
+            else:
+                # Window wraps around the circular genome
+                first_part = self.genome_sequence[start_pos:]
+                second_part = self.genome_sequence[:end_pos - len(self.genome_sequence)]
+                sequence_str = first_part + second_part
             
-            if promoter_end > promoter_start:
-                # Make promoter more AT-rich (typical for bacterial promoters)
-                at_probs = np.array([0.4, 0.4, 0.1, 0.1])  # More A/T
-                promoter_seq = np.random.choice(4, size=promoter_end - promoter_start, p=at_probs)
-                sequence_ints[promoter_start:promoter_end] = promoter_seq
+            # Pad or truncate to exact sequence length
+            if len(sequence_str) < self.seq_len:
+                # Pad with 'N' if sequence is too short
+                sequence_str += 'N' * (self.seq_len - len(sequence_str))
+            elif len(sequence_str) > self.seq_len:
+                # Truncate if sequence is too long
+                sequence_str = sequence_str[:self.seq_len]
+            
+            # Convert to integers
+            sequence_ints = np.array([self.dna_to_int.get(base, 4) for base in sequence_str])
+            
+        else:
+            # Fallback to synthetic sequence generation
+            logger.debug("Using synthetic sequence generation")
+            
+            # E. coli has ~50.8% GC content
+            gc_content = 0.508
+            
+            # Generate sequence with appropriate base composition
+            probs = np.array([
+                (1 - gc_content) / 2,  # A
+                (1 - gc_content) / 2,  # T  
+                gc_content / 2,        # G
+                gc_content / 2         # C
+            ])
+            
+            # Generate random sequence with E. coli-like composition
+            sequence_ints = np.random.choice(4, size=self.seq_len, p=probs)
+            
+            # Add some realistic patterns around genes
+            for gene in window['genes']:
+                gene_start = gene['relative_start']
+                gene_end = gene['relative_end']
+                
+                # Add AT-rich promoter region upstream of genes
+                promoter_start = max(0, gene_start - 100)
+                promoter_end = gene_start
+                
+                if promoter_end > promoter_start:
+                    # Make promoter more AT-rich (typical for bacterial promoters)
+                    at_probs = np.array([0.4, 0.4, 0.1, 0.1])  # More A/T
+                    promoter_seq = np.random.choice(4, size=promoter_end - promoter_start, p=at_probs)
+                    sequence_ints[promoter_start:promoter_end] = promoter_seq
         
         return torch.from_numpy(sequence_ints).long()
     
@@ -287,7 +349,7 @@ class RegulonDBDataLoader:
         }
 
 
-def collate_regulondb_batch(batch: List[Tuple]) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, Dict[str, torch.Tensor]]]:
+def collate_regulondb_batch(batch: List[Tuple]) -> Dict[str, torch.Tensor]:
     """
     Custom collate function for RegulonDB data
     
@@ -295,7 +357,7 @@ def collate_regulondb_batch(batch: List[Tuple]) -> Tuple[torch.Tensor, torch.Ten
         batch: List of (sequence, organism_index, targets) tuples
         
     Returns:
-        Tuple of (sequences, organism_indices, targets_by_organism)
+        Dictionary with 'dna', 'organism_index', and target tensors
     """
     sequences = []
     organism_indices = []
@@ -312,12 +374,17 @@ def collate_regulondb_batch(batch: List[Tuple]) -> Tuple[torch.Tensor, torch.Ten
     sequences = torch.stack(sequences)
     organism_indices = torch.tensor(organism_indices)
     
-    # Organize targets by organism (Phase 1: only E. coli)
-    targets_by_organism = {
-        "E_coli_K12": {}
+    # Create batch dictionary expected by trainer
+    batch_dict = {
+        'dna': sequences,
+        'organism_index': organism_indices
     }
     
+    # Add target tensors with expected naming convention
     for modality, target_list in targets_by_modality.items():
-        targets_by_organism["E_coli_K12"][modality] = torch.stack(target_list)
+        target_tensor = torch.stack(target_list)
+        batch_dict[f'target_{modality}'] = target_tensor
     
-    return sequences, organism_indices, targets_by_organism
+    return batch_dict
+
+

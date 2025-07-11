@@ -18,12 +18,12 @@ model:
 
 # Training hyperparameters - real data optimized
 training:
-  epochs: 50                                       # More epochs for real data
-  batch_size: 4                                    # Smaller batch due to large sequences
+  epochs: 5                                        # More epochs for real data
+  batch_size: 1                                    # Smaller batch due to large sequences
   learning_rate: 1e-4                             # Conservative learning rate
   weight_decay: 0.01                              # L2 regularization
   gradient_accumulation_steps: 4                   # Effective batch size = 16
-  mixed_precision: "fp16"                          # Memory optimization
+  mixed_precision: "no"                          # Memory optimization
   
   # Loss weights - Phase 1 modalities only (AlphaGenome style: no extra weighting)
   loss_weights:
@@ -61,8 +61,8 @@ data:
   
   # Chromosome-based cross-validation (following plan.md)
   cv_strategy: "chromosome_based"
-  train_angles: [0, 270]                           # 0° to 270° for training
-  val_angles: [270, 360]                           # 270° to 360° for validation
+  train_angles: [0, 75]                           # 0° to 270° for training
+  val_angles: [75, 90]                           # 270° to 360° for validation
 
 # Target organisms for Phase 1
 organisms:

@@ -140,11 +140,13 @@ class BactaGenomeTrainer:
             for modality, loss in modality_losses.items()
         }
         
-        return {
+        # Flatten modality losses to top level for training script compatibility
+        result = {
             'total_loss': avg_loss,
-            'modality_losses': avg_modality_losses,
             'samples_processed': total_samples
         }
+        result.update(avg_modality_losses)
+        return result
     
     def validate_epoch(self, dataloader: DataLoader) -> Dict[str, float]:
         """
@@ -220,11 +222,13 @@ class BactaGenomeTrainer:
             for modality, loss in modality_losses.items()
         }
         
-        return {
+        # Flatten modality losses to top level for training script compatibility
+        result = {
             'total_loss': avg_loss,
-            'modality_losses': avg_modality_losses,
             'samples_processed': total_samples
         }
+        result.update(avg_modality_losses)
+        return result
     
     def _move_batch_to_device(self, batch: Dict[str, Any]) -> Dict[str, Any]:
         """Move batch tensors to device"""

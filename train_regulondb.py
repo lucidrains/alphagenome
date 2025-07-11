@@ -100,6 +100,9 @@ def create_model(config: dict) -> BactaGenome:
 def create_regulondb_datasets(config: dict, regulondb_path: str, processed_data_dir: str):
     """Create RegulonDB training and validation datasets"""
     
+    # Path to E. coli genome FASTA file
+    genome_fasta_path = "./data/raw/EcoliGene/U00096_details(1).fasta"
+    
     # Create datasets using chromosome-based splits
     train_dataset = RegulonDBDataset(
         data_dir=processed_data_dir,
@@ -108,7 +111,8 @@ def create_regulondb_datasets(config: dict, regulondb_path: str, processed_data_
         organism_name="E_coli_K12",
         split='train',
         process_if_missing=True,
-        regulondb_raw_path=regulondb_path
+        regulondb_raw_path=regulondb_path,
+        genome_fasta_path=genome_fasta_path
     )
     
     val_dataset = RegulonDBDataset(
@@ -118,7 +122,8 @@ def create_regulondb_datasets(config: dict, regulondb_path: str, processed_data_
         organism_name="E_coli_K12", 
         split='val',
         process_if_missing=False,  # Already processed by train_dataset
-        regulondb_raw_path=None
+        regulondb_raw_path=None,
+        genome_fasta_path=genome_fasta_path
     )
     
     return train_dataset, val_dataset

@@ -275,57 +275,45 @@ class BacterialLossFunction(nn.Module):
     
     def forward(
         self, 
-        predictions: Dict[str, Dict[str, torch.Tensor]], 
-        targets: Dict[str, Dict[str, torch.Tensor]]
-    ) -> Dict[str, torch.Tensor]:
+        predictions: Dict[str, torch.Tensor], 
+        targets: Dict[str, torch.Tensor],
+        organism_name: str = None
+    ) -> tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         """
         Compute losses for all active modalities
         
         Args:
-            predictions: Nested dict [organism][modality] -> tensor
-            targets: Nested dict [organism][modality] -> tensor
+            predictions: Dict [modality] -> tensor (predictions for single organism)
+            targets: Dict [modality] -> tensor (targets for single organism)
+            organism_name: Name of organism (for logging/debugging)
         
         Returns:
-            Dictionary containing:
-            - Individual modality losses
-            - Total weighted loss
+            Tuple of (total_loss, individual_losses_dict)
         """
         modality_losses = {}
         total_loss = 0.0
         
-        for organism in predictions:
-            if organism not in targets:
+        for modality, pred in predictions.items():
+            if modality not in targets:
                 continue
-                
-            for modality, pred in predictions[organism].items():
-                if modality not in targets[organism]:
-                    continue
-                
-                if modality not in self.loss_functions:
-                    continue
-                
-                # Compute modality-specific loss
-                target = targets[organism][modality]
-                loss_fn = self.loss_functions[modality]
-                loss = loss_fn(pred, target)
-                
-                # Apply weighting
-                weight = self.loss_weights.get(modality, 1.0)
-                weighted_loss = loss * weight
-                
-                # Accumulate losses
-                if modality in modality_losses:
-                    modality_losses[modality] += weighted_loss
-                else:
-                    modality_losses[modality] = weighted_loss
-                
-                total_loss += weighted_loss
+            
+            if modality not in self.loss_functions:
+                continue
+            
+            # Compute modality-specific loss
+            target = targets[modality]
+            loss_fn = self.loss_functions[modality]
+            loss = loss_fn(pred, target)
+            
+            # Apply weighting
+            weight = self.loss_weights.get(modality, 1.0)
+            weighted_loss = loss * weight
+            
+            # Store individual loss
+            modality_losses[modality] = weighted_loss.item()
+            total_loss += weighted_loss
         
-        # Return all losses for monitoring
-        result = modality_losses.copy()
-        result['total_loss'] = total_loss
-        
-        return result
+        return total_loss, modality_losses
 
 
 # Alias for backward compatibility
