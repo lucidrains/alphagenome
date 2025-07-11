@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 import torch
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Dict, List, Tuple, Optional, Any, Iterator
 from dataclasses import dataclass
 from collections import defaultdict
 import logging
@@ -60,18 +60,22 @@ class RegulonDBProcessor:
         
         # DNA encoding
         self.dna_to_int = {'A': 0, 'T': 1, 'G': 2, 'C': 3, 'N': 4}
-        
-    def load_bson_file(self, file_path: Path) -> List[Dict]:
-        """Load and decode BSON file"""
+
+    def load_bson_file(self, file_path: Path, batch_size: int = 1000) -> Iterator[Dict]:
+        """Load and decode BSON file as iterator to handle large files efficiently"""
         try:
             with open(file_path, 'rb') as f:
-                data = f.read()
-            documents = bson.decode_all(data)
-            logger.info(f"Loaded {len(documents)} documents from {file_path.name}")
-            return documents
+                decoder = bson.decode_iter(f)
+                count = 0
+                for document in decoder:
+                    yield document
+                    count += 1
+                    if count % batch_size == 0:
+                        logger.debug(f"Processed {count} documents from {file_path.name}")
+            logger.info(f"Loaded {count} documents from {file_path.name}")
         except Exception as e:
             logger.error(f"Error loading {file_path}: {e}")
-            return []
+            return iter([])
     
     def process_gene_datamart(self) -> Dict[str, Dict]:
         """
@@ -119,6 +123,7 @@ class RegulonDBProcessor:
         
         logger.info(f"Processed {len(genes)} genes")
         self.genes = genes
+        # print(f'genes: {genes}')
         return genes
     
     def process_expression_data(self) -> Dict[str, np.ndarray]:
@@ -136,8 +141,10 @@ class RegulonDBProcessor:
         # Group by gene and collect expression across datasets/conditions
         expression_by_gene = defaultdict(list)
         dataset_ids = set()
-        
-        for doc in tqdm(documents[:50000], desc="Processing expression data"):  # Limit for testing
+
+        limit = 5000
+        now_at = 0
+        for doc in tqdm(documents, desc="Processing expression data"):  # Limit for testing
             gene_info = doc.get('gene', {})
             gene_id = gene_info.get('_id')
             bnumber = gene_info.get('bnumber')
@@ -149,6 +156,9 @@ class RegulonDBProcessor:
                     'datasets': doc.get('datasetIds', []),
                     'temporal_id': doc.get('temporalId')
                 })
+            now_at += 1
+            if now_at >= limit:
+                break
         
         logger.info(f"Found {len(dataset_ids)} unique datasets")
         logger.info(f"Expression data for {len(expression_by_gene)} genes")
@@ -243,8 +253,9 @@ class RegulonDBProcessor:
             operons_in_window = []
             
             for gene_id, gene_info in self.genes.items():
-                gene_start = gene_info.get('left_pos', 0)
-                gene_end = gene_info.get('right_pos', 0)
+                # print(f'gene_id: {gene_id}, gene_info: {gene_info}')
+                gene_start = gene_info.get('left_pos', 0) if gene_info.get('left_pos') is not None else 0
+                gene_end = gene_info.get('right_pos', 0) if gene_info.get('right_pos') is not None else 0
                 
                 # Check if gene overlaps with window
                 if gene_start < end_pos and gene_end > start_pos:
@@ -320,7 +331,7 @@ class RegulonDBProcessor:
                     
                     # Broadcast expression across gene region
                     for pos in range(start_idx, end_idx):
-                        targets['promoter_strength'][window_idx, pos] = torch.from_numpy(expression)
+                        targets['promoter_strength'][window_idx, pos][:expression.shape[0]] = torch.from_numpy(expression)
             
             # RBS efficiency targets (simplified - binary presence)
             for gene in window['genes']:
