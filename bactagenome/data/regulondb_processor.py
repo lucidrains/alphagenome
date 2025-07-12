@@ -65,13 +65,24 @@ class RegulonDBProcessor:
         """Load and decode BSON file as iterator to handle large files efficiently"""
         try:
             with open(file_path, 'rb') as f:
-                decoder = bson.decode_iter(f)
                 count = 0
-                for document in decoder:
-                    yield document
-                    count += 1
-                    if count % batch_size == 0:
-                        logger.debug(f"Processed {count} documents from {file_path.name}")
+                while True:
+                    try:
+                        # Use BSON's built-in file iterator
+                        document = bson.decode_file_iter(f).__next__()
+                        yield document
+                        count += 1
+                        
+                        if count % batch_size == 0:
+                            logger.debug(f"Processed {count} documents from {file_path.name}")
+                            
+                    except StopIteration:
+                        # End of file reached
+                        break
+                    except Exception as doc_error:
+                        logger.warning(f"Error decoding document {count}: {doc_error}")
+                        break
+                        
             logger.info(f"Loaded {count} documents from {file_path.name}")
         except Exception as e:
             logger.error(f"Error loading {file_path}: {e}")
