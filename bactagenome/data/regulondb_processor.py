@@ -426,8 +426,8 @@ class RegulonDBProcessor:
 
 def main():
     """Example usage of RegulonDB processor"""
-    regulondb_path = "/Users/zhaoj/Project/BactaGenome/data/raw/RegulonDB"
-    output_dir = "/Users/zhaoj/Project/BactaGenome/data/processed/regulondb"
+    regulondb_path = "./data/raw/RegulonDB"
+    output_dir = "./data/processed/regulondb"
     
     processor = RegulonDBProcessor(regulondb_path, output_dir)
     windows, targets = processor.process_all()
