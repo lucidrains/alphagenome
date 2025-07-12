@@ -142,7 +142,7 @@ class RegulonDBProcessor:
         expression_by_gene = defaultdict(list)
         dataset_ids = set()
 
-        limit = 5000
+        limit = None
         now_at = 0
         for doc in tqdm(documents, desc="Processing expression data"):  # Limit for testing
             gene_info = doc.get('gene', {})
@@ -157,7 +157,7 @@ class RegulonDBProcessor:
                     'temporal_id': doc.get('temporalId')
                 })
             now_at += 1
-            if now_at >= limit:
+            if limit is not None and now_at >= limit:
                 break
         
         logger.info(f"Found {len(dataset_ids)} unique datasets")
@@ -228,7 +228,7 @@ class RegulonDBProcessor:
     def create_training_windows(
         self, 
         window_size: int = 98304,
-        overlap: float = 0.1
+        overlap: float = 0.6
     ) -> List[Dict]:
         """
         Create training windows from the E. coli genome

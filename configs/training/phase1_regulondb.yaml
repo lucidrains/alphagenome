@@ -56,13 +56,13 @@ data:
   seq_len: 98304                                   # Must match model.context_length
   
   # Data processing
-  window_overlap: 0.1                              # 10% overlap between windows
+  window_overlap: 0.8                              # 10% overlap between windows
   min_genes_per_window: 1                          # Minimum genes for valid window
   
   # Chromosome-based cross-validation (following plan.md)
   cv_strategy: "chromosome_based"
-  train_angles: [0, 75]                           # 0° to 270° for training
-  val_angles: [75, 90]                           # 270° to 360° for validation
+  train_angles: [0, 270]                           # 0° to 270° for training
+  val_angles: [270, 360]                           # 270° to 360° for validation
 
 # Target organisms for Phase 1
 organisms:

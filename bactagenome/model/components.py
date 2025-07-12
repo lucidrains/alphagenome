@@ -975,7 +975,7 @@ class TransformerUnet(Module):
         # embed with one hot and add skip
 
         dna_embed, skip = self.dna_embed(seq)
-        print(f'DNA embed shape: {dna_embed.shape}, skip shape: {skip.shape}')
+        # print(f'DNA embed shape: {dna_embed.shape}, skip shape: {skip.shape}')
 
         # downs
 
@@ -984,7 +984,7 @@ class TransformerUnet(Module):
         for down in self.downs:
             skips.append(x)
             x = down(x)
-            print(f'down-res output shape: {x.shape}')
+            # print(f'down-res output shape: {x.shape}')
 
         x = rearrange(x, 'b d n -> b n d')
 
@@ -995,21 +995,21 @@ class TransformerUnet(Module):
 
         # attention
 
-        print(f'transformer tower input shape: {x.shape}')
+        # print(f'transformer tower input shape: {x.shape}')
         single, pairwise = self.transformer(x)  # 1D 128bp resolution, 2D contact pairs
-        print(f'single shape: {single.shape}, pairwise shape: {pairwise.shape}')
+        # print(f'single shape: {single.shape}, pairwise shape: {pairwise.shape}')
 
         # ups with skips from down
 
         x = rearrange(single, 'b n d -> b d n')
 
-        print(f'before up-res input shape: {x.shape}')
+        # print(f'before up-res input shape: {x.shape}')
         for i, up in enumerate(self.ups):
             is_last = i == (len(self.ups) - 1)
             skip = skips.pop() if not is_last else None
 
             x = up(x, skip=skip)
-            print(f'up-res {i} output shape: {x.shape}')
+            # print(f'up-res {i} output shape: {x.shape}')
 
         out = rearrange(x, 'b d n -> b n d')  # 1D 1bp resolution
 
