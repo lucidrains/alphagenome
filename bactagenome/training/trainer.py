@@ -10,6 +10,7 @@ import logging
 from tqdm import tqdm
 from accelerate import Accelerator
 from .losses import BacterialLossFunction
+from ..model.heads import RealisticBacterialLossFunction
 
 
 class BactaGenomeTrainer:
@@ -25,10 +26,18 @@ class BactaGenomeTrainer:
         device: str = "cuda",
         accelerator: Optional[Accelerator] = None,
         log_interval: int = 10,
+        use_alphgenome_loss: bool = True,
     ):
         self.model = model
         self.optimizer = optimizer
-        self.loss_function = loss_function or BacterialLossFunction()
+        # Use improved AlphaGenome-style loss by default
+        if loss_function is None:
+            if use_alphgenome_loss:
+                self.loss_function = RealisticBacterialLossFunction(use_alphgenome_loss=True)
+            else:
+                self.loss_function = BacterialLossFunction()
+        else:
+            self.loss_function = loss_function
         self.device = device
         self.accelerator = accelerator
         self.log_interval = log_interval
@@ -248,7 +257,7 @@ class BactaGenomeTrainer:
         targets = {}
         
         target_keys = [
-            'promoter_strength', 'rbs_efficiency', 'operon_coregulation'
+            'gene_expression', 'gene_density', 'operon_membership'
         ]
         
         for key in target_keys:

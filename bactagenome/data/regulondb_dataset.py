@@ -35,7 +35,8 @@ class RegulonDBDataset(Dataset):
         split: str = "train",
         process_if_missing: bool = True,
         regulondb_raw_path: Optional[str] = None,
-        genome_fasta_path: Optional[str] = None
+        genome_fasta_path: Optional[str] = None,
+        max_docs_per_file: Optional[int] = None
     ):
         """
         Initialize RegulonDB dataset
@@ -56,6 +57,7 @@ class RegulonDBDataset(Dataset):
         self.organism_name = organism_name
         self.split = split
         self.genome_fasta_path = genome_fasta_path
+        self.max_docs_per_file = max_docs_per_file
         
         # DNA encoding
         self.dna_to_int = {'A': 0, 'T': 1, 'G': 2, 'C': 3, 'N': 4}
@@ -76,8 +78,9 @@ class RegulonDBDataset(Dataset):
         
         # Check for processed data
         windows_file = self.data_dir / "training_windows.json"
-        targets_file = self.data_dir / "target_tensors.pt"
+        targets_file = self.data_dir / "training_targets.pt"
         metadata_file = self.data_dir / "metadata.json"
+        stats_file = self.data_dir / "normalization_stats.json"
         
         if windows_file.exists() and targets_file.exists() and metadata_file.exists():
             logger.info("Loading existing processed RegulonDB data...")
@@ -91,6 +94,13 @@ class RegulonDBDataset(Dataset):
             with open(metadata_file, 'r') as f:
                 self.metadata = json.load(f)
             
+            # Load normalization stats if available
+            if stats_file.exists():
+                with open(stats_file, 'r') as f:
+                    self.normalization_stats = json.load(f)
+            else:
+                self.normalization_stats = {}
+            
             logger.info(f"Loaded {len(self.windows)} windows and {len(self.targets)} target modalities")
             
         elif process_if_missing and regulondb_raw_path:
@@ -98,7 +108,7 @@ class RegulonDBDataset(Dataset):
             
             # Process raw data
             processor = RegulonDBProcessor(regulondb_raw_path, str(self.data_dir))
-            self.windows, self.targets = processor.process_all()
+            self.windows, self.targets = processor.process_all(max_docs_per_file=self.max_docs_per_file)
             
             # Load metadata
             with open(self.data_dir / "metadata.json", 'r') as f:
@@ -252,15 +262,12 @@ class RegulonDBDataset(Dataset):
         """Return number of samples in this split"""
         return len(self.indices)
     
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, int, Dict[str, torch.Tensor]]:
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         """
-        Get a training sample
+        Get a training sample compatible with realistic heads
         
         Returns:
-            Tuple of (sequence, organism_index, targets)
-            - sequence: [seq_len] DNA sequence as integers
-            - organism_index: int (0 for E. coli)  
-            - targets: Dict of target tensors by modality
+            Dict with 'dna', 'organism_index', 'organism_name', and target tensors
         """
         
         # Map to actual window index
@@ -273,12 +280,18 @@ class RegulonDBDataset(Dataset):
         # Organism index (0 for E. coli in Phase 1)
         organism_index = 0
         
-        # Extract targets for this window
-        targets = {}
-        for modality, tensor in self.targets.items():
-            targets[modality] = tensor[window_idx]
+        # Prepare sample dictionary
+        sample = {
+            'dna': sequence,
+            'organism_index': torch.tensor(organism_index, dtype=torch.long),
+            'organism_name': self.organism_name,
+        }
         
-        return sequence, organism_index, targets
+        # Add target values
+        for target_name, target_tensor in self.targets.items():
+            sample[f'target_{target_name}'] = target_tensor[window_idx]
+        
+        return sample
     
     def get_organism_name(self, organism_index: int) -> str:
         """Get organism name from index"""
@@ -286,11 +299,11 @@ class RegulonDBDataset(Dataset):
     
     def get_num_conditions(self) -> int:
         """Get number of expression conditions"""
-        return self.targets['promoter_strength'].shape[-1] if 'promoter_strength' in self.targets else 50
+        return self.targets['gene_expression'].shape[-1] if 'gene_expression' in self.targets else 1
     
     def get_num_coexpression_tracks(self) -> int:
         """Get number of co-expression tracks"""
-        return self.targets['operon_coregulation'].shape[-1] if 'operon_coregulation' in self.targets else 20
+        return self.targets['operon_membership'].shape[-1] if 'operon_membership' in self.targets else 1
 
 
 class RegulonDBDataLoader:
@@ -349,42 +362,38 @@ class RegulonDBDataLoader:
         }
 
 
-def collate_regulondb_batch(batch: List[Tuple]) -> Dict[str, torch.Tensor]:
+def collate_regulondb_batch(batch: List[Dict[str, Any]]) -> Dict[str, torch.Tensor]:
     """
     Custom collate function for RegulonDB data
+    Compatible with realistic heads training pipeline
     
     Args:
-        batch: List of (sequence, organism_index, targets) tuples
+        batch: List of sample dictionaries
         
     Returns:
         Dictionary with 'dna', 'organism_index', and target tensors
     """
-    sequences = []
-    organism_indices = []
-    targets_by_modality = defaultdict(list)
+    if not batch:
+        return {}
     
-    for sequence, organism_idx, targets in batch:
-        sequences.append(sequence)
-        organism_indices.append(organism_idx)
-        
-        for modality, target in targets.items():
-            targets_by_modality[modality].append(target)
+    # Collate DNA sequences
+    dna_sequences = torch.stack([sample['dna'] for sample in batch])
     
-    # Stack tensors
-    sequences = torch.stack(sequences)
-    organism_indices = torch.tensor(organism_indices)
+    # Collate organism indices
+    organism_indices = torch.stack([sample['organism_index'] for sample in batch])
     
-    # Create batch dictionary expected by trainer
-    batch_dict = {
-        'dna': sequences,
-        'organism_index': organism_indices
+    # Create batch dictionary
+    collated = {
+        'dna': dna_sequences,
+        'organism_index': organism_indices,
     }
     
-    # Add target tensors with expected naming convention
-    for modality, target_list in targets_by_modality.items():
-        target_tensor = torch.stack(target_list)
-        batch_dict[f'target_{modality}'] = target_tensor
+    # Add all target fields
+    target_keys = [key for key in batch[0].keys() if key.startswith('target_')]
+    for target_key in target_keys:
+        target_tensors = [sample[target_key] for sample in batch]
+        collated[target_key] = torch.stack(target_tensors)
     
-    return batch_dict
+    return collated
 
 

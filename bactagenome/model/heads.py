@@ -11,7 +11,7 @@ from einops import repeat, reduce
 import math
 
 
-def tracks_scaled_predictions(embeddings: torch.Tensor, num_tracks: int, head: nn.Module, scale_param: Parameter) -> torch.Tensor:
+def tracks_scaled_predictions(embeddings: torch.Tensor, head: nn.Module, scale_param: Parameter) -> torch.Tensor:
     """
     AlphaGenome-style track prediction with learnable scaling
     """
@@ -39,82 +39,81 @@ def predictions_scaling(predictions: torch.Tensor, track_means: torch.Tensor, ap
     return x * track_means
 
 
-class PromoterStrengthHead(nn.Module):
-    """
-    Promoter strength prediction head - AlphaGenome style
-    
-    Based on RegulonDB data:
-    - geneExpression.bson (2.6GB): Expression levels under different conditions  
-    - transcriptionStartSite.bson (49MB): 68,044 TSS positions with promoter data
-    
-    Predicts gene expression levels across conditions using both 1bp and 128bp embeddings.
-    Follows AlphaGenome's RNA-seq head architecture with multi-resolution inputs.
-    """
-    
-    def __init__(self, dim_1bp: int, dim_128bp: int, num_conditions: int = 50):
-        super().__init__()
-        self.num_conditions = num_conditions
-        
-        # Separate linear heads for each resolution (AlphaGenome pattern)
-        self.head_1bp = Linear(dim_1bp, num_conditions)
-        self.head_128bp = Linear(dim_128bp, num_conditions)
-        
-        # Learnable per-track scaling (AlphaGenome pattern)
-        self.scale = Parameter(torch.zeros(num_conditions))  # Init to 0 for softplus
-        
-        # Track means for scaling (set during data preprocessing)
-        self.register_buffer('track_means', torch.ones(num_conditions))
-    
-    def forward(self, embeds_1bp: torch.Tensor, embeds_128bp: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            embeds_1bp: [batch, seq_len, dim_1bp] - 1bp resolution embeddings
-            embeds_128bp: [batch, seq_len//128, dim_128bp] - 128bp resolution embeddings
-        
-        Returns:
-            [batch, seq_len, num_conditions] - Expression levels per condition
-        """
-        # Process each resolution separately (AlphaGenome pattern)
-        x_1bp = self.head_1bp(embeds_1bp)
-        x_128bp = self.head_128bp(embeds_128bp)
-        
-        # Upsample 128bp to 1bp resolution
-        x_128bp_upsampled = repeat(x_128bp, 'b n c -> b (n repeat) c', repeat=128)
-        
-        # Handle length mismatches
-        seq_len = x_1bp.shape[1]
-        if x_128bp_upsampled.shape[1] != seq_len:
-            x_128bp_upsampled = x_128bp_upsampled[:, :seq_len]
-        
-        # Combine multi-resolution predictions
-        combined = x_1bp + x_128bp_upsampled
-        
-        # Apply softplus + learnable scaling (AlphaGenome pattern)
-        return F.softplus(combined) * F.softplus(self.scale)
+def soft_clip(x: torch.Tensor) -> torch.Tensor:
+    """Soft clipping for numerical stability in loss calculations"""
+    return torch.where(x > 10.0, 2 * torch.sqrt(x * 10.0) - 10.0, x)
 
 
-class RBSEfficiencyHead(nn.Module):
+def multinomial_poisson_loss(predictions: torch.Tensor, targets: torch.Tensor, 
+                           multinomial_resolution: int = 128,
+                           multinomial_weight: float = 5.0) -> torch.Tensor:
     """
-    RBS (Ribosome Binding Site) translation efficiency prediction head
+    AlphaGenome-style loss combining multinomial and Poisson components
+    """
+    batch_size, seq_len, num_tracks = predictions.shape
     
-    Based on RegulonDB data:
-    - geneDatamart.bson (142MB): 4,747 genes with 5' UTR sequences containing RBS
-    - geneExpression.bson: Translation efficiency inferred from mRNA vs protein ratios
+    # Adjust resolution if sequence length is not divisible
+    if seq_len % multinomial_resolution != 0:
+        # Use adaptive resolution or fall back to simple segments
+        num_segments = max(1, seq_len // 64)  # At least 1 segment, up to seq_len//64
+        segment_size = seq_len // num_segments
+    else:
+        segment_size = multinomial_resolution
+        num_segments = seq_len // segment_size
     
-    Predicts translation initiation rates at single nucleotide resolution.
-    Uses only 1bp embeddings for precise RBS motif detection.
+    # If sequence is too small, fall back to MSE loss
+    if num_segments < 2:
+        mse_loss = torch.nn.MSELoss()
+        return mse_loss(predictions, targets)
+    
+    # Reshape for segment-wise loss calculation
+    # Truncate to make evenly divisible
+    effective_length = num_segments * segment_size
+    pred_truncated = predictions[:, :effective_length]
+    target_truncated = targets[:, :effective_length]
+    
+    pred_segments = pred_truncated.reshape(batch_size, num_segments, segment_size, num_tracks)
+    target_segments = target_truncated.reshape(batch_size, num_segments, segment_size, num_tracks)
+    
+    # Sum over segment positions
+    sum_pred = torch.sum(pred_segments, dim=2, keepdim=True)  # [batch, num_segments, 1, num_tracks]
+    sum_target = torch.sum(target_segments, dim=2, keepdim=True)
+    
+    # Poisson loss on segment totals
+    poisson_loss = torch.sum(sum_pred - sum_target * torch.log(sum_pred + 1e-7))
+    
+    # Multinomial loss on within-segment distributions
+    multinomial_prob = pred_segments / (sum_pred + 1e-7)
+    positional_loss = torch.sum(-target_segments * torch.log(multinomial_prob + 1e-7))
+    
+    return poisson_loss / segment_size + multinomial_weight * positional_loss
+
+
+class GeneExpressionHead(nn.Module):
+    """
+    Gene expression prediction head using realistic RegulonDB data
+    
+    Based on actual RegulonDB analysis and AlphaGenome techniques:
+    - Uses log-normalized TPM/FPKM values from geneExpression.bson
+    - Predicts continuous expression levels with learnable scaling
+    - AlphaGenome-style softplus activation and scaling parameters
     """
     
-    def __init__(self, dim_1bp: int):
+    def __init__(self, dim_1bp: int, num_tracks: int = 1, dropout: float = 0.1):
         super().__init__()
-        # Single output track for translation efficiency
-        self.efficiency_head = Linear(dim_1bp, 1)
+        self.num_tracks = num_tracks
         
-        # Learnable scaling parameter (AlphaGenome pattern)
-        self.scale = Parameter(torch.zeros(1))  # Init to 0 for softplus
+        # Linear projection to track outputs
+        self.linear = Linear(dim_1bp, num_tracks)
         
-        # Track mean for scaling
-        self.register_buffer('track_means', torch.ones(1))
+        # Learnable per-track scaling parameters (AlphaGenome style)
+        self.scale = Parameter(torch.zeros(num_tracks))
+        
+        # Track means for scaling (will be set during training)
+        self.register_buffer('track_means', torch.ones(num_tracks))
+        
+        # Initialize with Xavier uniform for stable training
+        nn.init.xavier_uniform_(self.linear.weight)
     
     def forward(self, embeds_1bp: torch.Tensor) -> torch.Tensor:
         """
@@ -122,74 +121,113 @@ class RBSEfficiencyHead(nn.Module):
             embeds_1bp: [batch, seq_len, dim_1bp] - 1bp resolution embeddings
         
         Returns:
-            [batch, seq_len, 1] - Translation efficiency scores
+            [batch, seq_len, num_tracks] - Expression values with learnable scaling
         """
-        # Linear projection to efficiency scores
-        efficiency_logits = self.efficiency_head(embeds_1bp)
-        
-        # Softplus activation + learnable scaling (AlphaGenome pattern)
-        return F.softplus(efficiency_logits) * F.softplus(self.scale)
+        return tracks_scaled_predictions(embeds_1bp, self.linear, self.scale)
+    
+    def set_track_means(self, track_means: torch.Tensor):
+        """Set track means for proper scaling"""
+        self.track_means.data = track_means
 
 
-class OperonCoregulationHead(nn.Module):
+class GeneDensityHead(nn.Module):
     """
-    Operon co-regulation prediction head
+    Gene density prediction head - counts genes per genomic region
     
-    Based on RegulonDB data:
-    - operonDatamart.bson (64MB): 2,609 operons with detailed structure
-    - geneCoexpressions.bson (2.0GB): Co-expression patterns between genes
-    - regulatoryNetworkDatamart.bson (54MB): Regulatory interactions
-    
-    Predicts gene co-expression within operons using both local context and long-range interactions.
-    Uses 128bp embeddings for gene-level features + pairwise embeddings for operon structure.
+    Based on RegulonDB gene distribution and AlphaGenome techniques:
+    - Predicts number of genes in 128bp bins
+    - Uses AlphaGenome-style count modeling with softplus activation
+    - Learnable scaling for better count predictions
     """
     
-    def __init__(self, dim_128bp: int, dim_pairwise: int, num_coexpression_tracks: int = 20):
+    def __init__(self, dim_128bp: int, num_tracks: int = 1, dropout: float = 0.1):
         super().__init__()
-        self.num_tracks = num_coexpression_tracks
+        self.num_tracks = num_tracks
         
-        # Local gene context head (128bp resolution)
-        self.local_head = Linear(dim_128bp, num_coexpression_tracks)
+        # Linear projection to track outputs
+        self.linear = Linear(dim_128bp, num_tracks)
         
-        # Long-range operon structure processor (pairwise embeddings)
-        self.pair_processor = nn.Sequential(
-            nn.AdaptiveAvgPool2d((1, 1)),  # Global pooling over sequence
-            nn.Flatten(),
-            Linear(dim_pairwise, num_coexpression_tracks)
-        )
-        
-        # Learnable per-track scaling (AlphaGenome pattern)
-        self.scale = Parameter(torch.zeros(num_coexpression_tracks))
+        # Learnable per-track scaling parameters (AlphaGenome style)
+        self.scale = Parameter(torch.zeros(num_tracks))
         
         # Track means for scaling
-        self.register_buffer('track_means', torch.ones(num_coexpression_tracks))
+        self.register_buffer('track_means', torch.ones(num_tracks))
+        
+        # Initialize with Xavier uniform
+        nn.init.xavier_uniform_(self.linear.weight)
     
-    def forward(self, embeds_128bp: torch.Tensor, embeds_pair: torch.Tensor) -> torch.Tensor:
+    def forward(self, embeds_128bp: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            embeds_128bp: [batch, seq_len//128, dim_128bp] - Gene-level features
-            embeds_pair: [batch, seq_len//2048, seq_len//2048, dim_pairwise] - Pairwise interactions
+            embeds_128bp: [batch, seq_len//128, dim_128bp] - 128bp resolution embeddings
         
         Returns:
-            [batch, seq_len//128, num_tracks] - Co-expression predictions
+            [batch, seq_len//128, num_tracks] - Gene counts with learnable scaling
         """
-        # Local gene-level predictions
-        local_predictions = self.local_head(embeds_128bp)
-        
-        # Global operon organization features
-        pair_features = embeds_pair.permute(0, 3, 1, 2)  # [batch, dim, height, width]
-        global_features = self.pair_processor(pair_features)  # [batch, num_tracks]
-        
-        # Broadcast global features to sequence length
-        seq_len = local_predictions.shape[1]
-        global_broadcast = global_features.unsqueeze(1).expand(-1, seq_len, -1)
-        
-        # Combine local and global predictions
-        combined = local_predictions + global_broadcast
-        
-        # Apply softplus + learnable scaling (AlphaGenome pattern)
-        return F.softplus(combined) * F.softplus(self.scale)
+        return tracks_scaled_predictions(embeds_128bp, self.linear, self.scale)
+    
+    def set_track_means(self, track_means: torch.Tensor):
+        """Set track means for proper scaling"""
+        self.track_means.data = track_means
 
+
+class OperonMembershipHead(nn.Module):
+    """
+    Operon membership prediction head - binary classification
+    
+    Based on RegulonDB operon structure:
+    - Predicts whether a gene region is part of an operon (binary)
+    - Uses 1bp resolution for precise gene boundary detection
+    - Simple binary classification task achievable with available data
+    """
+    
+    def __init__(self, dim_1bp: int, dropout: float = 0.1):
+        super().__init__()
+        
+        # Binary classification head for operon membership
+        self.projection = Linear(dim_1bp, 64)
+        self.activation = nn.ReLU()
+        self.dropout = nn.Dropout(dropout)
+        self.output_layer = Linear(64, 1)
+        
+        # Initialize with Xavier uniform
+        nn.init.xavier_uniform_(self.projection.weight)
+        nn.init.xavier_uniform_(self.output_layer.weight)
+    
+    def forward(self, embeds_1bp: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            embeds_1bp: [batch, seq_len, dim_1bp] - 1bp resolution embeddings
+        
+        Returns:
+            [batch, seq_len, 1] - Operon membership probabilities [0,1]
+        """
+        x = self.projection(embeds_1bp)
+        x = self.activation(x)
+        x = self.dropout(x)
+        x = self.output_layer(x)
+        # Sigmoid for binary classification probabilities
+        return torch.sigmoid(x)
+
+
+# Compatibility wrapper classes for existing code
+class PromoterStrengthHead(GeneExpressionHead):
+    """Compatibility wrapper for GeneExpressionHead"""
+    def __init__(self, dim_1bp: int, dim_128bp: int = None, num_conditions: int = 50, **kwargs):
+        # Use num_conditions as num_tracks for multi-condition expression
+        super().__init__(dim_1bp, num_tracks=num_conditions, **kwargs)
+
+class RBSEfficiencyHead(GeneDensityHead):
+    """Compatibility wrapper for GeneDensityHead"""
+    def __init__(self, dim_1bp: int, **kwargs):
+        # Convert 1bp to 128bp for gene density (typically dim_1bp is actually 128bp embedding)
+        super().__init__(dim_128bp=dim_1bp, **kwargs)
+
+class OperonCoregulationHead(OperonMembershipHead):
+    """Compatibility wrapper for OperonMembershipHead"""
+    def __init__(self, dim_128bp: int, dim_pairwise: int = None, num_coexpression_tracks: int = 20, **kwargs):
+        # Convert 128bp to 1bp for membership classification
+        super().__init__(dim_1bp=dim_128bp, **kwargs)
 
 # Advanced regulation heads (Phase 2)
 
@@ -410,3 +448,237 @@ class SecretionSignalHead(nn.Module):
         """
         signal_logits = self.signal_head(embeds_1bp)
         return torch.sigmoid(signal_logits)  # Multi-label classification
+
+
+class RealisticBacterialHeadManager(nn.ModuleDict):
+    """
+    Head manager for realistic bacterial genomics targets
+    Uses achievable prediction tasks based on actual RegulonDB data analysis
+    Compatible with existing BactaGenome model interface by inheriting from ModuleDict
+    """
+    
+    def __init__(self, dim_1bp: int, dim_128bp: int, organism_name: str):
+        # Initialize with realistic heads
+        heads_dict = {
+            'gene_expression': GeneExpressionHead(dim_1bp),
+            'gene_density': GeneDensityHead(dim_128bp), 
+            'operon_membership': OperonMembershipHead(dim_1bp)
+        }
+        super().__init__(heads_dict)
+        self.organism_name = organism_name
+    
+    @property
+    def heads(self):
+        """Return self for compatibility"""
+        return self
+        
+    def forward(self, embeds_1bp: torch.Tensor, embeds_128bp: torch.Tensor) -> dict:
+        """
+        Forward pass through all heads
+        
+        Args:
+            embeds_1bp: [batch, seq_len, dim_1bp]
+            embeds_128bp: [batch, seq_len//128, dim_128bp]
+            
+        Returns:
+            Dict of predictions for each target type
+        """
+        return {
+            'gene_expression': self['gene_expression'](embeds_1bp),
+            'gene_density': self['gene_density'](embeds_128bp),
+            'operon_membership': self['operon_membership'](embeds_1bp)
+        }
+    
+    def get_target_info(self) -> dict:
+        """Return information about each target type"""
+        return {
+            'gene_expression': {
+                'type': 'regression',
+                'resolution': '1bp', 
+                'loss': 'MSE',
+                'description': 'Log-normalized TPM/FPKM values'
+            },
+            'gene_density': {
+                'type': 'count_regression',
+                'resolution': '128bp',
+                'loss': 'MSE', 
+                'description': 'Number of genes per genomic bin'
+            },
+            'operon_membership': {
+                'type': 'binary_classification',
+                'resolution': '1bp',
+                'loss': 'BCE',
+                'description': 'Binary operon membership'
+            }
+        }
+
+
+class RealisticBacterialLossFunction(nn.Module):
+    """
+    Loss function for realistic bacterial genomics targets
+    Uses AlphaGenome-inspired loss functions for better training
+    """
+    
+    def __init__(self, loss_weights: dict = None, use_alphgenome_loss: bool = True):
+        super().__init__()
+        
+        # Default weights for each target
+        self.loss_weights = loss_weights or {
+            'gene_expression': 1.0,
+            'gene_density': 1.0, 
+            'operon_membership': 1.0
+        }
+        
+        self.use_alphgenome_loss = use_alphgenome_loss
+        
+        # Standard loss functions as fallback
+        self.mse_loss = nn.MSELoss()
+        self.bce_loss = nn.BCELoss()
+    
+    def forward(self, predictions: dict, targets: dict, organism_name: str) -> tuple:
+        """
+        Compute losses for all targets
+        
+        Args:
+            predictions: Dict of model predictions
+            targets: Dict of target tensors
+            organism_name: Name of organism (for compatibility)
+            
+        Returns:
+            Tuple of (total_loss, individual_losses_dict)
+        """
+        individual_losses = {}
+        total_loss = 0.0
+        
+        # Gene expression loss - use AlphaGenome-style for count-like data
+        if 'gene_expression' in predictions and 'gene_expression' in targets:
+            pred = predictions['gene_expression']
+            target = targets['gene_expression']
+            
+            # Ensure compatible shapes
+            if pred.shape != target.shape:
+                min_len = min(pred.shape[1], target.shape[1])
+                pred = pred[:, :min_len]
+                target = target[:, :min_len]
+            
+            if self.use_alphgenome_loss and len(pred.shape) == 3 and pred.shape[1] >= 128:
+                # Use multinomial+Poisson loss for sequence-level predictions
+                loss = multinomial_poisson_loss(pred, target, multinomial_resolution=128)
+            else:
+                # Fallback to MSE for simple cases
+                loss = self.mse_loss(pred, target)
+            
+            individual_losses['gene_expression'] = loss.item()
+            total_loss += self.loss_weights['gene_expression'] * loss
+        
+        # Gene density loss - AlphaGenome-style for count data
+        if 'gene_density' in predictions and 'gene_density' in targets:
+            pred = predictions['gene_density']
+            target = targets['gene_density']
+            
+            # Ensure compatible shapes
+            if pred.shape != target.shape:
+                min_len = min(pred.shape[1], target.shape[1])
+                pred = pred[:, :min_len]
+                target = target[:, :min_len]
+            
+            if self.use_alphgenome_loss and len(pred.shape) == 3 and pred.shape[1] >= 64:
+                # Use multinomial+Poisson loss for count predictions
+                resolution = min(64, pred.shape[1] // 8)  # Adaptive resolution
+                loss = multinomial_poisson_loss(pred, target, multinomial_resolution=resolution)
+            else:
+                # Fallback to MSE
+                loss = self.mse_loss(pred, target)
+            
+            individual_losses['gene_density'] = loss.item()
+            total_loss += self.loss_weights['gene_density'] * loss
+        
+        # Operon membership loss (BCE for binary classification)
+        if 'operon_membership' in predictions and 'operon_membership' in targets:
+            pred = predictions['operon_membership']
+            target = targets['operon_membership']
+            
+            # Ensure compatible shapes
+            if pred.shape != target.shape:
+                min_len = min(pred.shape[1], target.shape[1])
+                pred = pred[:, :min_len]
+                target = target[:, :min_len]
+            
+            loss = self.bce_loss(pred, target)
+            individual_losses['operon_membership'] = loss.item()
+            total_loss += self.loss_weights['operon_membership'] * loss
+        
+        return total_loss, individual_losses
+
+
+def create_realistic_bacterial_heads(dim_1bp: int, dim_128bp: int, organism_name: str) -> RealisticBacterialHeadManager:
+    """
+    Factory function to create realistic bacterial heads
+    
+    Args:
+        dim_1bp: Dimension of 1bp embeddings
+        dim_128bp: Dimension of 128bp embeddings
+        organism_name: Name of organism
+        
+    Returns:
+        RealisticBacterialHeadManager instance
+    """
+    return RealisticBacterialHeadManager(
+        dim_1bp=dim_1bp,
+        dim_128bp=dim_128bp,
+        organism_name=organism_name
+    )
+
+
+def integrate_realistic_heads_with_model(model, organism_name: str):
+    """
+    Replace model heads with realistic bacterial heads
+    
+    Args:
+        model: BactaGenome model instance
+        organism_name: Name of organism to replace heads for
+    """
+    if hasattr(model, 'heads') and organism_name in model.heads:
+        # Get input dimensions from model (after output embedding doubling)
+        if hasattr(model, 'dim_1bp') and hasattr(model, 'dim_128bp'):
+            dim_1bp = model.dim_1bp
+            dim_128bp = model.dim_128bp
+        elif hasattr(model, 'config') and hasattr(model.config, 'dims'):
+            # Calculate dimensions with output embedding doubling
+            first_dim = model.config.dims[0]
+            last_dim = model.config.dims[-1]
+            dim_1bp = 2 * first_dim
+            dim_128bp = 2 * last_dim
+        else:
+            # Default fallback
+            dim_1bp = 1536
+            dim_128bp = 3072
+        
+        # Keep the existing head configuration metadata
+        existing_head_config = {
+            'head_forward_arg_names': model.head_forward_arg_names[organism_name] if hasattr(model, 'head_forward_arg_names') else {},
+            'head_forward_arg_maps': model.head_forward_arg_maps[organism_name] if hasattr(model, 'head_forward_arg_maps') else {}
+        }
+        
+        # Replace with realistic heads
+        realistic_head_manager = create_realistic_bacterial_heads(dim_1bp, dim_128bp, organism_name)
+        model.heads[organism_name] = realistic_head_manager
+        
+        # Update head configuration for new heads
+        if hasattr(model, 'head_forward_arg_names'):
+            model.head_forward_arg_names[organism_name] = {
+                'gene_expression': ['embeds_1bp'],
+                'gene_density': ['embeds_128bp'],
+                'operon_membership': ['embeds_1bp']
+            }
+        
+        if hasattr(model, 'head_forward_arg_maps'):
+            model.head_forward_arg_maps[organism_name] = {
+                'gene_expression': {},
+                'gene_density': {},
+                'operon_membership': {}
+            }
+        
+        print(f"Replaced {organism_name} heads with realistic bacterial heads (1bp={dim_1bp}, 128bp={dim_128bp})")
+    else:
+        print(f"Warning: No existing heads found for {organism_name}")

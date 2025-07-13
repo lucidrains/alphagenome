@@ -64,19 +64,31 @@ python scripts/train.py --config configs/training/phase2.yaml
 
 ## 🧪 Prediction Modalities
 
-### Core Expression Control
-1. **Promoter Strength**: Expression levels across conditions
-2. **RBS Efficiency**: Translation initiation rates  
-3. **Operon Co-regulation**: Gene co-expression within operons
+> **Note**: BactaGenome's output modalities have evolved from theoretical targets to data-driven implementations. See [OUTPUT_MODALITIES.md](docs/OUTPUT_MODALITIES.md) for detailed explanation.
 
-### Advanced Regulation
-4. **Riboswitch Binding**: Ligand binding probabilities
-5. **sRNA Targets**: Small RNA interaction predictions
+### Current Implementation (Phase 1 - Data-Driven)
+1. **Gene Expression**: Log-normalized TPM/FPKM values from real RNA-seq data
+2. **Gene Density**: Count of genes per 128bp genomic bin  
+3. **Operon Membership**: Binary classification of operon participation
 
-### Systems-Level Features  
-6. **Transcription Termination**: Termination sites and mechanisms
-7. **Pathway Activity**: Metabolic pathway completeness
-8. **Secretion Signals**: Protein secretion system predictions
+### Planned Evolution (Phases 2-3)
+
+#### Advanced Expression Control
+4. **Multi-condition Expression**: Condition-specific gene expression profiles
+5. **Promoter Element Detection**: Sequence motif and regulatory element prediction
+6. **RBS Efficiency**: Quantitative translation initiation prediction
+
+#### Regulatory Networks
+7. **Operon Co-regulation**: Multi-track co-expression pattern modeling
+8. **Riboswitch Binding**: Ligand-specific riboswitch interaction prediction
+9. **sRNA Targets**: Small RNA target interaction prediction
+
+#### Systems-Level Features  
+10. **Transcription Termination**: Termination mechanism classification
+11. **Pathway Activity**: Metabolic pathway completeness scoring
+12. **Secretion Signals**: Multi-label secretion system prediction
+
+**Key Design Principle**: Each phase builds on proven success from the previous phase, ensuring stable training and biological relevance.
 
 ## 🦠 Supported Species
 
@@ -90,9 +102,16 @@ python scripts/train.py --config configs/training/phase2.yaml
 
 ## 📊 Performance Targets
 
-- **Promoter prediction**: R² ≥ 0.75
-- **RBS efficiency**: R² ≥ 0.80  
-- **Operon prediction**: AUROC ≥ 0.90
+### Current Phase 1 Targets (Data-Driven)
+- **Gene expression prediction**: R² ≥ 0.7
+- **Gene density prediction**: R² ≥ 0.8  
+- **Operon membership**: AUROC ≥ 0.9
+- **Training stability**: Consistent loss reduction over 20 epochs
+
+### Future Phase 2-3 Targets (Enhanced)
+- **Multi-condition expression**: R² ≥ 0.75
+- **Promoter element detection**: F1 ≥ 0.7
+- **RBS efficiency prediction**: R² ≥ 0.80
 - **Cross-species transfer**: <20% performance drop
 
 ## 🛠️ Project Structure
@@ -114,6 +133,7 @@ BactaGenome/
 
 ## 📚 Documentation
 
+- [**Output Modalities Evolution**](docs/OUTPUT_MODALITIES.md) - Detailed explanation of design changes
 - [Model Architecture](docs/model_architecture.md)
 - [Training Guide](docs/training_guide.md)
 - [Data Formats](docs/data_format.md)

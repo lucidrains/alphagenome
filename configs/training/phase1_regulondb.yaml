@@ -25,11 +25,12 @@ training:
   gradient_accumulation_steps: 4                   # Effective batch size = 16
   mixed_precision: "no"                          # Memory optimization
   
-  # Loss weights - Phase 1 modalities only (AlphaGenome style: no extra weighting)
+  # Loss weights - Phase 1 data-driven targets (realistic, achievable)
+  # See docs/OUTPUT_MODALITIES.md for detailed explanation of target evolution
   loss_weights:
-    promoter_strength: 1.0                         # Core expression prediction
-    rbs_efficiency: 1.0                           # Translation efficiency
-    operon_coregulation: 1.0                      # Gene co-regulation
+    gene_expression: 1.0                           # Log-normalized TPM/FPKM from RegulonDB RNA-seq (replaces promoter_strength)
+    gene_density: 1.0                             # Gene count per 128bp genomic bin (proxy for rbs_efficiency)
+    operon_membership: 1.0                        # Binary operon classification (simplified operon_coregulation)
   
   # Training schedule
   val_interval: 5                                  # Validate every 5 epochs

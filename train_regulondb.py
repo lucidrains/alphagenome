@@ -28,6 +28,7 @@ from bactagenome import BactaGenome, BactaGenomeConfig
 from bactagenome.data import RegulonDBDataset, RegulonDBDataLoader, collate_regulondb_batch
 from bactagenome.training import BactaGenomeTrainer
 from bactagenome.model.losses import BacterialLossFunction
+from bactagenome.model.heads import integrate_realistic_heads_with_model, RealisticBacterialLossFunction
 
 
 def setup_logging():
@@ -60,6 +61,8 @@ def parse_args():
                         help="Enable debug mode")
     parser.add_argument("--process-data-only", action="store_true",
                         help="Only process data, don't train")
+    parser.add_argument("--test-mode", action="store_true",
+                        help="Use limited data for testing")
     return parser.parse_args()
 
 
@@ -80,7 +83,7 @@ def set_seed(seed: int):
 
 
 def create_model(config: dict) -> BactaGenome:
-    """Create BactaGenome model from configuration"""
+    """Create BactaGenome model from configuration with realistic heads"""
     model_config = BactaGenomeConfig(
         dims=tuple(config['model']['dims']),
         context_length=config['model']['context_length'],
@@ -90,15 +93,19 @@ def create_model(config: dict) -> BactaGenome:
     
     model = BactaGenome(model_config)
     
-    # Add bacterial heads for each organism (Phase 1: E. coli only)
+    # Add standard bacterial heads first (for compatibility)
     phase = config.get('phase', 1)
     for organism_name in config['organisms']:
         model.add_bacterial_heads(organism_name, phase=phase)
     
+    # Replace with realistic heads
+    for organism_name in config['organisms']:
+        integrate_realistic_heads_with_model(model, organism_name)
+    
     return model
 
 
-def create_regulondb_datasets(config: dict, regulondb_path: str, processed_data_dir: str):
+def create_regulondb_datasets(config: dict, regulondb_path: str, processed_data_dir: str, max_docs_for_testing: int = None):
     """Create RegulonDB training and validation datasets"""
     
     # Path to E. coli genome FASTA file
@@ -113,7 +120,8 @@ def create_regulondb_datasets(config: dict, regulondb_path: str, processed_data_
         split='train',
         process_if_missing=True,
         regulondb_raw_path=regulondb_path,
-        genome_fasta_path=genome_fasta_path
+        genome_fasta_path=genome_fasta_path,
+        max_docs_per_file=max_docs_for_testing
     )
     
     val_dataset = RegulonDBDataset(
@@ -124,7 +132,8 @@ def create_regulondb_datasets(config: dict, regulondb_path: str, processed_data_
         split='val',
         process_if_missing=False,  # Already processed by train_dataset
         regulondb_raw_path=None,
-        genome_fasta_path=genome_fasta_path
+        genome_fasta_path=genome_fasta_path,
+        max_docs_per_file=max_docs_for_testing
     )
     
     return train_dataset, val_dataset
@@ -176,10 +185,13 @@ def main():
     os.makedirs(config['training']['log_dir'], exist_ok=True)
     os.makedirs(args.processed_data_dir, exist_ok=True)
     
+    # Determine data limits for testing
+    max_docs = 1000 if args.test_mode else None
+    
     # Create datasets
     logger.info("Creating RegulonDB datasets...")
     train_dataset, val_dataset = create_regulondb_datasets(
-        config, args.regulondb_path, args.processed_data_dir
+        config, args.regulondb_path, args.processed_data_dir, max_docs
     )
     
     logger.info(f"Train dataset: {len(train_dataset)} samples")
@@ -198,9 +210,17 @@ def main():
     model = create_model(config)
     logger.info(f"Model created with {model.total_parameters:,} parameters")
     
-    # Print model heads info
-    for organism, heads in model.heads.items():
-        logger.info(f"Organism {organism}: {list(heads.keys())}")
+    # Print realistic heads info
+    for organism in config['organisms']:
+        if hasattr(model, 'heads') and organism in model.heads:
+            head_manager = model.heads[organism]
+            if hasattr(head_manager, 'get_target_info'):
+                target_info = head_manager.get_target_info()
+                logger.info(f"Realistic heads for {organism}:")
+                for target_name, info in target_info.items():
+                    logger.info(f"  • {target_name}: {info['type']} ({info['resolution']}, {info['loss']} loss)")
+            else:
+                logger.info(f"Organism {organism}: Standard heads (no target info available)")
     
     # Create optimizer
     optimizer = torch.optim.AdamW(
@@ -209,14 +229,14 @@ def main():
         weight_decay=float(config['training']['weight_decay'])
     )
     
-    # Create loss function with RegulonDB-appropriate weights
+    # Create realistic loss function with proper weights
     loss_weights = config['training'].get('loss_weights', {
-        'promoter_strength': 1.0,
-        'rbs_efficiency': 1.0,
-        'operon_coregulation': 1.0
+        'gene_expression': 1.0,
+        'gene_density': 1.0,
+        'operon_membership': 1.0
     })
     
-    loss_function = BacterialLossFunction(loss_weights=loss_weights)
+    loss_function = RealisticBacterialLossFunction(loss_weights=loss_weights)
     
     # Setup accelerator
     ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)

@@ -55,18 +55,22 @@ class RegulonDBProcessor:
         # Data containers
         self.genes = {}
         self.operons = {}
-        self.expression_data = defaultdict(list)
+        self.expression_data = {}
+        self.expression_stats = {}
         self.promoter_positions = []
         
         # DNA encoding
         self.dna_to_int = {'A': 0, 'T': 1, 'G': 2, 'C': 3, 'N': 4}
 
-    def load_bson_file(self, file_path: Path, batch_size: int = 1000) -> Iterator[Dict]:
+    def load_bson_file(self, file_path: Path, batch_size: int = 1000, max_docs: Optional[int] = None) -> Iterator[Dict]:
         """Load and decode BSON file as iterator to handle large files efficiently"""
         try:
             with open(file_path, 'rb') as f:
                 count = 0
                 while True:
+                    if max_docs and count >= max_docs:
+                        break
+                        
                     try:
                         # Use BSON's built-in file iterator
                         document = bson.decode_file_iter(f).__next__()
@@ -88,7 +92,7 @@ class RegulonDBProcessor:
             logger.error(f"Error loading {file_path}: {e}")
             return iter([])
     
-    def process_gene_datamart(self) -> Dict[str, Dict]:
+    def process_gene_datamart(self, max_docs: Optional[int] = None) -> Dict[str, Dict]:
         """
         Process geneDatamart.bson to extract gene sequences and 5' UTR regions
         
@@ -98,7 +102,7 @@ class RegulonDBProcessor:
         logger.info("Processing gene datamart...")
         
         gene_file = self.regulondb_path / "regulondbdatamarts" / "geneDatamart.bson"
-        documents = self.load_bson_file(gene_file)
+        documents = self.load_bson_file(gene_file, max_docs=max_docs)
         
         genes = {}
         for doc in tqdm(documents, desc="Processing genes"):
@@ -137,60 +141,135 @@ class RegulonDBProcessor:
         # print(f'genes: {genes}')
         return genes
     
-    def process_expression_data(self) -> Dict[str, np.ndarray]:
+    def process_expression_data(self, max_docs: Optional[int] = None) -> Dict[str, Dict]:
         """
-        Process geneExpression.bson to extract expression levels across conditions
+        Process real expression data from RegulonDB with proper normalization
         
         Returns:
-            Dictionary mapping gene IDs to expression arrays across conditions
+            Dictionary mapping gene IDs to expression dictionaries with normalized values
         """
         logger.info("Processing gene expression data...")
         
         expr_file = self.regulondb_path / "regulondbht" / "geneExpression.bson"
         documents = self.load_bson_file(expr_file)
         
-        # Group by gene and collect expression across datasets/conditions
-        expression_by_gene = defaultdict(list)
-        dataset_ids = set()
-
-        limit = None
-        now_at = 0
-        for doc in tqdm(documents, desc="Processing expression data"):  # Limit for testing
+        # Collect raw expression values
+        raw_expression = defaultdict(list)
+        all_tpm_values = []
+        all_fpkm_values = []
+        all_count_values = []
+        
+        count = 0
+        for doc in tqdm(documents, desc="Processing expression"):
+            if max_docs and count >= max_docs:
+                break
+                
             gene_info = doc.get('gene', {})
             gene_id = gene_info.get('_id')
             bnumber = gene_info.get('bnumber')
-            dataset_ids.update(doc.get('datasetIds', []))
             
-            if gene_id and bnumber:
-                expression_by_gene[gene_id].append({
+            # Extract expression values if available
+            tpm = doc.get('tpm')
+            fpkm = doc.get('fpkm') 
+            count_val = doc.get('count')
+            
+            if gene_id and any([tpm, fpkm, count_val]):
+                expression_record = {
+                    'gene_id': gene_id,
                     'bnumber': bnumber,
-                    'datasets': doc.get('datasetIds', []),
-                    'temporal_id': doc.get('temporalId')
-                })
-            now_at += 1
-            if limit is not None and now_at >= limit:
-                break
-        
-        logger.info(f"Found {len(dataset_ids)} unique datasets")
-        logger.info(f"Expression data for {len(expression_by_gene)} genes")
-        
-        # Convert to structured arrays (simplified for now)
-        expression_data = {}
-        for gene_id, expr_list in expression_by_gene.items():
-            # Create a simple binary presence matrix (gene expressed in condition)
-            num_conditions = min(50, len(dataset_ids))  # Limit to 50 conditions
-            condition_vector = np.zeros(num_conditions)
+                    'tpm': tpm,
+                    'fpkm': fpkm,
+                    'count': count_val,
+                    'dataset_ids': doc.get('datasetIds', [])
+                }
+                
+                raw_expression[gene_id].append(expression_record)
+                
+                # Collect for normalization stats
+                if tpm is not None:
+                    all_tpm_values.append(tpm)
+                if fpkm is not None:
+                    all_fpkm_values.append(fpkm)
+                if count_val is not None:
+                    all_count_values.append(count_val)
             
-            # Mark conditions where gene has expression data
-            for i, expr in enumerate(expr_list[:num_conditions]):
-                condition_vector[i] = 1.0  # Binary presence for now
-            
-            expression_data[gene_id] = condition_vector
+            count += 1
         
-        self.expression_data = expression_data
-        return expression_data
+        logger.info(f"Found expression data for {len(raw_expression)} genes")
+        logger.info(f"Total TPM values: {len(all_tpm_values)}")
+        logger.info(f"Total FPKM values: {len(all_fpkm_values)}")
+        logger.info(f"Total count values: {len(all_count_values)}")
+        
+        # Compute normalization statistics (log-transform for very large values)
+        expression_stats = {
+            'tpm_log_mean': 0.0,
+            'tpm_log_std': 1.0,
+            'fpkm_log_mean': 0.0,
+            'fpkm_log_std': 1.0,
+            'count_log_mean': 0.0,
+            'count_log_std': 1.0
+        }
+        
+        if all_tpm_values:
+            log_tpm = np.log1p(all_tpm_values)  # log(1+x) for numerical stability
+            expression_stats['tpm_log_mean'] = np.mean(log_tpm)
+            expression_stats['tpm_log_std'] = np.std(log_tpm)
+            
+        if all_fpkm_values:
+            log_fpkm = np.log1p(all_fpkm_values)
+            expression_stats['fpkm_log_mean'] = np.mean(log_fpkm)
+            expression_stats['fpkm_log_std'] = np.std(log_fpkm)
+            
+        if all_count_values:
+            log_count = np.log1p(all_count_values)
+            expression_stats['count_log_mean'] = np.mean(log_count)
+            expression_stats['count_log_std'] = np.std(log_count)
+        
+        self.expression_stats = expression_stats
+        logger.info(f"Expression normalization stats: {expression_stats}")
+        
+        # Process and normalize expression data
+        processed_expression = {}
+        for gene_id, expr_list in raw_expression.items():
+            # Average across multiple measurements for the same gene
+            tpm_values = [e['tpm'] for e in expr_list if e['tpm'] is not None]
+            fpkm_values = [e['fpkm'] for e in expr_list if e['fpkm'] is not None]
+            count_values = [e['count'] for e in expr_list if e['count'] is not None]
+            
+            processed_record = {
+                'bnumber': expr_list[0]['bnumber'],
+                'num_measurements': len(expr_list),
+                'datasets': list(set().union(*[e['dataset_ids'] for e in expr_list]))
+            }
+            
+            # Compute mean and normalized values
+            if tpm_values:
+                mean_tpm = np.mean(tpm_values)
+                log_tpm = np.log1p(mean_tpm)
+                processed_record['tpm_raw'] = mean_tpm
+                processed_record['tpm_log'] = log_tpm
+                processed_record['tpm_normalized'] = (log_tpm - expression_stats['tpm_log_mean']) / expression_stats['tpm_log_std']
+                
+            if fpkm_values:
+                mean_fpkm = np.mean(fpkm_values)
+                log_fpkm = np.log1p(mean_fpkm)
+                processed_record['fpkm_raw'] = mean_fpkm
+                processed_record['fpkm_log'] = log_fpkm
+                processed_record['fpkm_normalized'] = (log_fpkm - expression_stats['fpkm_log_mean']) / expression_stats['fpkm_log_std']
+                
+            if count_values:
+                mean_count = np.mean(count_values)
+                log_count = np.log1p(mean_count)
+                processed_record['count_raw'] = mean_count
+                processed_record['count_log'] = log_count
+                processed_record['count_normalized'] = (log_count - expression_stats['count_log_mean']) / expression_stats['count_log_std']
+            
+            processed_expression[gene_id] = processed_record
+        
+        self.expression_data = processed_expression
+        return processed_expression
     
-    def process_operon_data(self) -> Dict[str, Dict]:
+    def process_operon_data(self, max_docs: Optional[int] = None) -> Dict[str, Dict]:
         """
         Process operonDatamart.bson to extract operon structure and co-regulation
         
@@ -200,7 +279,7 @@ class RegulonDBProcessor:
         logger.info("Processing operon data...")
         
         operon_file = self.regulondb_path / "regulondbdatamarts" / "operonDatamart.bson"
-        documents = self.load_bson_file(operon_file)
+        documents = self.load_bson_file(operon_file, max_docs=max_docs)
         
         operons = {}
         for doc in tqdm(documents, desc="Processing operons"):
@@ -274,7 +353,7 @@ class RegulonDBProcessor:
                         'gene_id': gene_id,
                         'relative_start': max(0, gene_start - start_pos),
                         'relative_end': min(window_size, gene_end - start_pos),
-                        'expression': self.expression_data.get(gene_id, np.zeros(50))
+                        'expression': self.expression_data.get(gene_id, {})
                     })
             
             for operon_id, operon_info in self.operons.items():
@@ -307,67 +386,94 @@ class RegulonDBProcessor:
     
     def create_target_tensors(self, windows: List[Dict]) -> Dict[str, torch.Tensor]:
         """
-        Create target tensors for each modality from processed windows
+        Create realistic training targets based on available data
         
-        Args:
-            windows: List of training windows with genomic annotations
-            
-        Returns:
-            Dictionary of target tensors by modality
+        Target 1: Gene Expression Level (log-normalized TPM/FPKM)
+        Target 2: Gene Density (genes per region)  
+        Target 3: Operon Membership (binary classification)
         """
-        logger.info("Creating target tensors...")
+        logger.info("Creating realistic training targets...")
         
         num_windows = len(windows)
         window_size = 98304
         
-        # Initialize target tensors
+        # Initialize target tensors with appropriate designs
         targets = {
-            'promoter_strength': torch.zeros(num_windows, window_size, 50),  # 50 conditions
-            'rbs_efficiency': torch.zeros(num_windows, window_size, 1),
-            'operon_coregulation': torch.zeros(num_windows, window_size // 128, 20)  # 20 co-expression tracks
+            # Gene expression prediction (continuous values, properly normalized)
+            'gene_expression': torch.zeros(num_windows, window_size, 1),
+            
+            # Gene density prediction (count of genes per 128bp bin)
+            'gene_density': torch.zeros(num_windows, window_size // 128, 1),
+            
+            # Operon membership (binary classification for gene regions)
+            'operon_membership': torch.zeros(num_windows, window_size, 1)
         }
         
         for window_idx, window in enumerate(tqdm(windows, desc="Creating targets")):
             
-            # Promoter strength targets (expression levels)
+            # Target 1: Gene Expression Level
             for gene in window['genes']:
                 gene_start = gene['relative_start']
                 gene_end = gene['relative_end']
-                expression = gene['expression']
                 
-                # Assign expression to gene region
                 if gene_start < window_size and gene_end > 0:
                     start_idx = max(0, gene_start)
                     end_idx = min(window_size, gene_end)
                     
-                    # Broadcast expression across gene region
-                    for pos in range(start_idx, end_idx):
-                        targets['promoter_strength'][window_idx, pos][:expression.shape[0]] = torch.from_numpy(expression)
+                    # Use normalized TPM as expression target (default to 0 if no data)
+                    expression_value = 0.0
+                    if 'expression' in gene and isinstance(gene['expression'], dict):
+                        expr_data = gene['expression']
+                        if 'tpm_normalized' in expr_data:
+                            expression_value = expr_data['tpm_normalized']
+                        elif 'fpkm_normalized' in expr_data:
+                            expression_value = expr_data['fpkm_normalized']
+                    
+                    # Assign expression value to gene region
+                    targets['gene_expression'][window_idx, start_idx:end_idx, 0] = expression_value
             
-            # RBS efficiency targets (simplified - binary presence)
+            # Target 2: Gene Density (genes per 128bp bin)
+            bin_size = 128
+            num_bins = window_size // bin_size
+            
             for gene in window['genes']:
                 gene_start = gene['relative_start']
-                # RBS is typically ~100 bp upstream of gene start
-                rbs_start = max(0, gene_start - 100)
-                rbs_end = min(window_size, gene_start + 20)
+                gene_end = gene['relative_end']
                 
-                if rbs_start < rbs_end:
-                    # Simple binary RBS presence
-                    targets['rbs_efficiency'][window_idx, rbs_start:rbs_end, 0] = 1.0
+                # Determine which bins this gene overlaps
+                start_bin = max(0, gene_start // bin_size)
+                end_bin = min(num_bins - 1, gene_end // bin_size)
+                
+                for bin_idx in range(start_bin, end_bin + 1):
+                    targets['gene_density'][window_idx, bin_idx, 0] += 1.0
             
-            # Operon co-regulation targets (gene co-expression)
+            # Target 3: Operon Membership
             for operon in window['operons']:
-                operon_start = operon['relative_start'] // 128  # Convert to 128bp resolution
-                operon_end = operon['relative_end'] // 128
-                
-                if operon_start < operon_end and operon_end <= window_size // 128:
-                    # Create co-expression pattern for genes in operon
-                    coexpr_pattern = np.random.rand(20)  # Placeholder - would use real co-expression data
+                for gene_info in operon['genes']:
+                    gene_id = gene_info['gene_id']
                     
-                    for pos in range(operon_start, operon_end):
-                        targets['operon_coregulation'][window_idx, pos] = torch.from_numpy(coexpr_pattern)
+                    # Find the corresponding gene in window['genes']
+                    for gene in window['genes']:
+                        if gene['gene_id'] == gene_id:
+                            gene_start = gene['relative_start']
+                            gene_end = gene['relative_end']
+                            
+                            if gene_start < window_size and gene_end > 0:
+                                start_idx = max(0, gene_start)
+                                end_idx = min(window_size, gene_end)
+                                
+                                # Mark as part of operon
+                                targets['operon_membership'][window_idx, start_idx:end_idx, 0] = 1.0
+                            break
         
-        logger.info(f"Created target tensors for {len(targets)} modalities")
+        # Log target statistics
+        for target_name, target_tensor in targets.items():
+            non_zero = (target_tensor != 0).float().mean().item()
+            mean_val = target_tensor.mean().item()
+            std_val = target_tensor.std().item()
+            
+            logger.info(f"{target_name}: {non_zero:.1%} non-zero, mean={mean_val:.3f}, std={std_val:.3f}")
+        
         return targets
     
     def save_processed_data(self, windows: List[Dict], targets: Dict[str, torch.Tensor]):
@@ -380,16 +486,23 @@ class RegulonDBProcessor:
             json.dump(windows, f, indent=2, default=str)
         
         # Save target tensors
-        targets_file = self.output_dir / "target_tensors.pt"
+        targets_file = self.output_dir / "training_targets.pt"
         torch.save(targets, targets_file)
+        
+        # Save normalization statistics separately
+        stats_file = self.output_dir / "normalization_stats.json"
+        with open(stats_file, 'w') as f:
+            json.dump(self.expression_stats, f, indent=2)
         
         # Save gene and operon metadata
         metadata = {
             'genes': self.genes,
             'operons': self.operons,
-            'expression_stats': {
+            'expression_stats': self.expression_stats,
+            'data_summary': {
                 'num_genes_with_expression': len(self.expression_data),
-                'num_conditions': 50
+                'num_genes_total': len(self.genes),
+                'num_operons_total': len(self.operons)
             }
         }
         
@@ -399,7 +512,7 @@ class RegulonDBProcessor:
         
         logger.info(f"Saved processed data to {self.output_dir}")
     
-    def process_all(self) -> Tuple[List[Dict], Dict[str, torch.Tensor]]:
+    def process_all(self, max_docs_per_file: Optional[int] = None) -> Tuple[List[Dict], Dict[str, torch.Tensor]]:
         """
         Complete processing pipeline
         
@@ -409,9 +522,9 @@ class RegulonDBProcessor:
         logger.info("Starting complete RegulonDB processing pipeline...")
         
         # Process each data type
-        self.process_gene_datamart()
-        self.process_expression_data()
-        self.process_operon_data()
+        self.process_gene_datamart(max_docs_per_file)
+        self.process_expression_data(max_docs_per_file)
+        self.process_operon_data(max_docs_per_file)
         
         # Create training data
         windows = self.create_training_windows()
