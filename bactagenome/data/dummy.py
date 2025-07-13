@@ -42,7 +42,7 @@ class DummyBacterialTargetsDataset(Dataset):
             
             # Phase 1 Head 1: Promoter Strength (1bp resolution, multiple conditions)
             if 'promoter_strength' in config:
-                num_conditions = config['promoter_strength'].get('num_conditions', 10)
+                num_conditions = config['promoter_strength'].get('num_conditions', 50)
                 organism_targets['promoter_strength'] = torch.rand(self.len_1bp, num_conditions).clamp(min=0.01, max=10.0)
             
             # Phase 1 Head 2: RBS Translation Efficiency (1bp resolution, single output)

@@ -203,7 +203,7 @@ def main():
         logger.info(f"Organism {organism}: {list(heads.keys())}")
     
     # Create optimizer
-    optimizer = torch.optim.Adam(
+    optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=float(config['training']['learning_rate']),
         weight_decay=float(config['training']['weight_decay'])
@@ -258,29 +258,45 @@ def main():
         
         # Training
         train_metrics = trainer.train_epoch(train_loader, epoch + 1)
-        logger.info(f"Train Loss: {train_metrics['total_loss']:.4f}")
+        logger.info(f"=== EPOCH {epoch + 1} TRAINING LOSSES ===")
+        logger.info(f"🔢 Total Loss: {train_metrics['total_loss']:.6f}")
         
-        # Log individual modality losses
-        modality_losses = {k: v for k, v in train_metrics.items() if k != 'total_loss'}
-        for modality, loss in modality_losses.items():
-            logger.info(f"Train {modality}: {loss:.4f}")
+        # Log individual modality losses with clear formatting
+        modality_losses = {k: v for k, v in train_metrics.items() if k not in ['total_loss', 'samples_processed']}
+        if modality_losses:
+            logger.info("📊 Individual Modality Losses:")
+            for modality, loss in modality_losses.items():
+                logger.info(f"   • {modality}: {loss:.6f}")
+        else:
+            logger.info("⚠️  No individual modality losses found!")
+        
+        logger.info(f"👥 Samples processed: {train_metrics.get('samples_processed', 'unknown')}")
+        logger.info("=" * 40)
         
         # Validation
         if (epoch + 1) % config['training'].get('val_interval', 5) == 0:
             val_metrics = trainer.validate_epoch(val_loader)
-            logger.info(f"Val Loss: {val_metrics['total_loss']:.4f}")
+            logger.info(f"=== EPOCH {epoch + 1} VALIDATION LOSSES ===")
+            logger.info(f"🔢 Total Validation Loss: {val_metrics['total_loss']:.6f}")
             
             # Log individual modality losses
-            val_modality_losses = {k: v for k, v in val_metrics.items() if k != 'total_loss'}
-            for modality, loss in val_modality_losses.items():
-                logger.info(f"Val {modality}: {loss:.4f}")
+            val_modality_losses = {k: v for k, v in val_metrics.items() if k not in ['total_loss', 'samples_processed']}
+            if val_modality_losses:
+                logger.info("📊 Individual Validation Modality Losses:")
+                for modality, loss in val_modality_losses.items():
+                    logger.info(f"   • {modality}: {loss:.6f}")
+            else:
+                logger.info("⚠️  No individual validation modality losses found!")
+            
+            logger.info(f"👥 Validation samples processed: {val_metrics.get('samples_processed', 'unknown')}")
+            logger.info("=" * 40)
             
             # Save best model
             if val_metrics['total_loss'] < best_val_loss:
                 best_val_loss = val_metrics['total_loss']
                 best_model_path = os.path.join(config['training']['checkpoint_dir'], 'best_model_regulondb.pt')
                 trainer.save_checkpoint(best_model_path, epoch + 1, val_loss=best_val_loss)
-                logger.info(f"New best model saved: {best_model_path}")
+                logger.info(f"🏆 New best model saved: {best_model_path}")
         
         # Save checkpoint
         if (epoch + 1) % config['training']['checkpoint_interval'] == 0:

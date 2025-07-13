@@ -3,14 +3,14 @@
 
 # Model configuration - Small model for testing
 model:
-  dims: [512, 640, 768, 896, 1024, 1152, 1280]  # Small U-Net dimensions
+  dims: [64, 80, 96, 112, 128, 144, 160]  # Small U-Net dimensions
   context_length: 98304  # Small context for testing
   num_organisms: 1  # Phase 1: E. coli only
   transformer_kwargs:
-    depth: 9  # Very shallow for testing
-    heads: 6
-    dim_head_qk: 96  # Smaller dimensions
-    dim_head_v: 128
+    depth: 2  # Very shallow for testing
+    heads: 1
+    dim_head_qk: 64  # Smaller dimensions
+    dim_head_v: 96
     dropout: 0.1
     ff_expansion_factor: 2.0
     max_positions: 768  # Must be >= context_length/16 = 128
