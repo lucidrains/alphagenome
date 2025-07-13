@@ -9,7 +9,7 @@ einx>=0.1.0
 accelerate>=0.20.0
 
 # Data processing
-bson>=0.5.10  # For RegulonDB BSON file processing
+# bson>=0.5.10  # For RegulonDB BSON file processing
 pymongo>=4.13.2
 tqdm>=4.62.0
 
