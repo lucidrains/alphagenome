@@ -10,6 +10,7 @@ import yaml
 import random
 import numpy as np
 import logging
+import math
 from pathlib import Path
 from collections import defaultdict
 
@@ -118,6 +119,7 @@ def create_regulondb_datasets(config: dict, regulondb_path: str, processed_data_
         num_organisms=config['model']['num_organisms'],
         organism_name="E_coli_K12",
         split='train',
+        enable_augmentation=True,
         process_if_missing=True,
         regulondb_raw_path=regulondb_path,
         genome_fasta_path=genome_fasta_path,
@@ -130,6 +132,7 @@ def create_regulondb_datasets(config: dict, regulondb_path: str, processed_data_
         num_organisms=config['model']['num_organisms'],
         organism_name="E_coli_K12", 
         split='val',
+        enable_augmentation=False,
         process_if_missing=False,  # Already processed by train_dataset
         regulondb_raw_path=None,
         genome_fasta_path=genome_fasta_path,
@@ -222,11 +225,13 @@ def main():
             else:
                 logger.info(f"Organism {organism}: Standard heads (no target info available)")
     
-    # Create optimizer
+    # Create optimizer - AlphaGenome style parameters
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=float(config['training']['learning_rate']),
-        weight_decay=float(config['training']['weight_decay'])
+        weight_decay=float(config['training']['weight_decay']),
+        betas=(0.9, 0.999),  # AlphaGenome defaults
+        eps=1e-8             # AlphaGenome defaults
     )
     
     # Create realistic loss function with proper weights
@@ -247,10 +252,34 @@ def main():
         kwargs_handlers=[ddp_kwargs]
     )
     
+    # Create learning rate scheduler with warmup (AlphaGenome style)
+    def create_lr_scheduler(optimizer, config):
+        """Create AlphaGenome-style learning rate scheduler with warmup"""
+        warmup_steps = config['training'].get('warmup_steps', 1000)
+        total_steps = config['training'].get('total_steps', 3000)
+        
+        def lr_lambda(current_step):
+            if current_step < warmup_steps:
+                # Linear warmup from 0 to peak learning rate
+                return float(current_step) / float(max(1, warmup_steps))
+            else:
+                # Cosine decay from peak to 0
+                progress = float(current_step - warmup_steps) / float(max(1, total_steps - warmup_steps))
+                return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress)))
+        
+        return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+    
+    # Create scheduler
+    scheduler = create_lr_scheduler(optimizer, config) if config['training'].get('scheduler') == 'cosine_with_warmup' else None
+    
     # Prepare for distributed training
     model, optimizer, train_loader, val_loader = accelerator.prepare(
         model, optimizer, train_loader, val_loader
     )
+    
+    # Prepare scheduler after accelerator.prepare
+    if scheduler is not None:
+        scheduler = accelerator.prepare(scheduler)
     
     # Create trainer
     trainer = BactaGenomeTrainer(
@@ -259,7 +288,9 @@ def main():
         loss_function=loss_function,
         device=accelerator.device,
         accelerator=accelerator,
-        log_interval=config['training'].get('log_interval', 10)
+        log_interval=config['training'].get('log_interval', 10),
+        max_grad_norm=config['training'].get('max_grad_norm'),
+        scheduler=scheduler
     )
     
     # Resume from checkpoint if provided

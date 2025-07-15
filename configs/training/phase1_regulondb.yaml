@@ -16,14 +16,19 @@ model:
     dropout: 0.1                                   # Dropout rate
     max_positions: 8192                            # Max sequence positions
 
-# Training hyperparameters - real data optimized
+# Training hyperparameters - AlphaGenome-aligned parameters
 training:
   epochs: 5                                        # More epochs for real data
+  # AlphaGenome uses batch_size: 64, but smaller here due to memory constraints
   batch_size: 1                                    # Smaller batch due to large sequences
-  learning_rate: 1e-4                             # Conservative learning rate
-  weight_decay: 0.01                              # L2 regularization
-  gradient_accumulation_steps: 4                   # Effective batch size = 16
+  learning_rate: 0.004                            # AlphaGenome peak learning rate (was 1e-4)
+  # AlphaGenome uses weight_decay: 0.4, but we use smaller due to limited data
+  weight_decay: 0.1                               # L2 regularization (increased from 0.01)
+  gradient_accumulation_steps: 4                   # Effective batch size = 4 (AlphaGenome: 64)
   mixed_precision: "no"                          # Memory optimization
+  
+  # Gradient clipping for stability with AlphaGenome-style loss
+  max_grad_norm: 1.0                              # Clip gradients to prevent explosion
   
   # Loss weights - Phase 1 data-driven targets (realistic, achievable)
   # See docs/OUTPUT_MODALITIES.md for detailed explanation of target evolution
@@ -37,9 +42,11 @@ training:
   checkpoint_interval: 10                          # Save checkpoint every 10 epochs
   log_interval: 10                                 # Log every 10 steps
   
-  # Optimization
-  warmup_steps: 500                                # Warmup schedule
-  scheduler: "cosine"                              # Learning rate schedule
+  # Optimization - AlphaGenome style
+  # AlphaGenome uses 5,000 warmup steps out of 15,000 total
+  warmup_steps: 1000                               # Warmup schedule (increased from 500)
+  scheduler: "cosine_with_warmup"                  # Learning rate schedule with warmup
+  total_steps: 3000                                # Total training steps (for LR schedule)
   
   # Hardware and performance
   num_workers: 2                                   # Data loading workers

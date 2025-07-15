@@ -27,6 +27,8 @@ class BactaGenomeTrainer:
         accelerator: Optional[Accelerator] = None,
         log_interval: int = 10,
         use_alphgenome_loss: bool = True,
+        max_grad_norm: Optional[float] = None,
+        scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None,
     ):
         self.model = model
         self.optimizer = optimizer
@@ -41,6 +43,8 @@ class BactaGenomeTrainer:
         self.device = device
         self.accelerator = accelerator
         self.log_interval = log_interval
+        self.max_grad_norm = max_grad_norm
+        self.scheduler = scheduler
         
         # Setup logging
         self.logger = logging.getLogger(__name__)
@@ -122,8 +126,19 @@ class BactaGenomeTrainer:
                 self.accelerator.backward(batch_loss)
             else:
                 batch_loss.backward()
+            
+            # Gradient clipping for stability
+            if self.max_grad_norm is not None:
+                if self.accelerator is not None:
+                    self.accelerator.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
+                else:
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.max_grad_norm)
                 
             self.optimizer.step()
+            
+            # Update learning rate scheduler
+            if self.scheduler is not None:
+                self.scheduler.step()
             
             # Update metrics
             total_loss += batch_loss.item()
