@@ -134,6 +134,7 @@ BactaGenome/
 ## 📚 Documentation
 
 - [**Output Modalities Evolution**](docs/OUTPUT_MODALITIES.md) - Detailed explanation of design changes
+- [**Data Augmentation**](docs/DATA_AUGMENTATION.md) - AlphaGenome-style augmentation adapted for bacteria
 - [Model Architecture](docs/model_architecture.md)
 - [Training Guide](docs/training_guide.md)
 - [Data Formats](docs/data_format.md)

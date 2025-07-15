@@ -14,6 +14,7 @@ from collections import defaultdict
 import logging
 
 from .regulondb_processor import RegulonDBProcessor
+from .augmentation import BacterialSequenceAugmentation, create_augmentation_transform
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +37,12 @@ class RegulonDBDataset(Dataset):
         process_if_missing: bool = True,
         regulondb_raw_path: Optional[str] = None,
         genome_fasta_path: Optional[str] = None,
-        max_docs_per_file: Optional[int] = None
+        max_docs_per_file: Optional[int] = None,
+        # AlphaGenome-style augmentation parameters (adapted for bacterial genomes)
+        enable_augmentation: bool = True,
+        shift_range: int = 256,  # Reduced from 1024bp for bacterial regulatory elements
+        reverse_complement_prob: float = 0.5,
+        circular_genome: bool = True
     ):
         """
         Initialize RegulonDB dataset
@@ -50,6 +56,11 @@ class RegulonDBDataset(Dataset):
             process_if_missing: Whether to process raw data if processed data missing
             regulondb_raw_path: Path to raw RegulonDB BSON files
             genome_fasta_path: Path to E. coli genome FASTA file for real sequences
+            max_docs_per_file: Maximum documents to process per BSON file
+            enable_augmentation: Whether to enable data augmentation (AlphaGenome-style)
+            shift_range: Maximum shift distance in bp (±256bp, adapted from AlphaGenome's ±1024bp for bacterial regulatory scale)
+            reverse_complement_prob: Probability of reverse complement (0.5 from AlphaGenome)
+            circular_genome: Whether to treat genome as circular (True for bacteria)
         """
         self.data_dir = Path(data_dir)
         self.seq_len = seq_len
@@ -58,6 +69,21 @@ class RegulonDBDataset(Dataset):
         self.split = split
         self.genome_fasta_path = genome_fasta_path
         self.max_docs_per_file = max_docs_per_file
+        
+        # Augmentation setup
+        self.enable_augmentation = enable_augmentation and (split == "train")  # Only augment training data
+        if self.enable_augmentation:
+            self.augmentation = create_augmentation_transform(
+                shift_range=shift_range,
+                reverse_complement_prob=reverse_complement_prob,
+                enable_shift=True,
+                enable_reverse_complement=True,
+                circular_genome=circular_genome
+            )
+            logger.info(f"Enabled AlphaGenome-style augmentation: shift_range=±{shift_range}bp, reverse_prob={reverse_complement_prob}")
+        else:
+            self.augmentation = None
+            logger.info("Data augmentation disabled")
         
         # DNA encoding
         self.dna_to_int = {'A': 0, 'T': 1, 'G': 2, 'C': 3, 'N': 4}
@@ -290,6 +316,10 @@ class RegulonDBDataset(Dataset):
         # Add target values
         for target_name, target_tensor in self.targets.items():
             sample[f'target_{target_name}'] = target_tensor[window_idx]
+        
+        # Apply data augmentation if enabled (only for training)
+        if self.augmentation is not None:
+            sample = self.augmentation(sample)
         
         return sample
     

@@ -60,6 +60,13 @@ data:
   window_overlap: 0.8                              # 10% overlap between windows
   min_genes_per_window: 1                          # Minimum genes for valid window
   
+  # AlphaGenome-style data augmentation (adapted for bacterial genomes)
+  augmentation:
+    enable: true                                   # Enable data augmentation for training
+    shift_range: 256                               # ±256bp shifts (reduced from AlphaGenome's ±1024bp for bacterial scale)
+    reverse_complement_prob: 0.5                   # 50% probability of reverse complement
+    circular_genome: true                          # Treat bacterial genome as circular
+  
   # Chromosome-based cross-validation (following plan.md)
   cv_strategy: "chromosome_based"
   train_angles: [0, 270]                           # 0° to 270° for training
