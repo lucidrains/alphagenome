@@ -84,7 +84,7 @@ organisms:
   - "E_coli_K12"                                   # Phase 1: single organism
 
 # Phase indicator
-phase: 1
+phase: 0
 
 # RegulonDB specific settings
 regulondb:

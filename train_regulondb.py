@@ -29,7 +29,7 @@ from bactagenome import BactaGenome, BactaGenomeConfig
 from bactagenome.data import RegulonDBDataset, RegulonDBDataLoader, collate_regulondb_batch
 from bactagenome.training import BactaGenomeTrainer
 from bactagenome.model.losses import BacterialLossFunction
-from bactagenome.model.heads import integrate_realistic_heads_with_model, RealisticBacterialLossFunction
+from bactagenome.model.heads import RegulonDBLossFunction
 
 
 def setup_logging():
@@ -84,7 +84,7 @@ def set_seed(seed: int):
 
 
 def create_model(config: dict) -> BactaGenome:
-    """Create BactaGenome model from configuration with realistic heads"""
+    """Create BactaGenome model from configuration with RegulonDB-based heads"""
     model_config = BactaGenomeConfig(
         dims=tuple(config['model']['dims']),
         context_length=config['model']['context_length'],
@@ -94,14 +94,10 @@ def create_model(config: dict) -> BactaGenome:
     
     model = BactaGenome(model_config)
     
-    # Add standard bacterial heads first (for compatibility)
-    phase = config.get('phase', 1)
+    # Add RegulonDB-based bacterial heads directly (phase 0)
+    phase = config.get('phase', 0)  # Default to phase 0 for RegulonDB training
     for organism_name in config['organisms']:
         model.add_bacterial_heads(organism_name, phase=phase)
-    
-    # Replace with realistic heads
-    for organism_name in config['organisms']:
-        integrate_realistic_heads_with_model(model, organism_name)
     
     return model
 
@@ -219,7 +215,7 @@ def main():
             head_manager = model.heads[organism]
             if hasattr(head_manager, 'get_target_info'):
                 target_info = head_manager.get_target_info()
-                logger.info(f"Realistic heads for {organism}:")
+                logger.info(f"RegulonDB-based heads for {organism}:")
                 for target_name, info in target_info.items():
                     logger.info(f"  • {target_name}: {info['type']} ({info['resolution']}, {info['loss']} loss)")
             else:
@@ -241,7 +237,7 @@ def main():
         'operon_membership': 1.0
     })
     
-    loss_function = RealisticBacterialLossFunction(loss_weights=loss_weights)
+    loss_function = RegulonDBLossFunction(loss_weights=loss_weights)
     
     # Setup accelerator
     ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)

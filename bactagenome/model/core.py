@@ -116,66 +116,88 @@ class BactaGenome(nn.Module):
         
         self.head_forward_arg_maps[organism][head_name] = head_forward_arg_map
     
-    def add_bacterial_heads(self, organism: str, phase: int = 1):
+    def add_bacterial_heads(self, organism: str, phase: int = 0):
         """Add bacterial-specific prediction heads for an organism"""
         
-        if phase == 1:
+        if phase == 0:
+            # Phase 0: RegulonDB-based heads (gene expression, density, operon membership)
+            from .heads import GeneExpressionHead, GeneDensityHead, OperonMembershipHead
+            
+            bacterial_heads = [
+                ("gene_expression", GeneExpressionHead(self.dim_1bp)),
+                ("gene_density", GeneDensityHead(self.dim_128bp)),
+                ("operon_membership", OperonMembershipHead(self.dim_1bp))
+            ]
+            
+            for head_name, head in bacterial_heads:
+                self.add_head(organism, head_name, head)
+            
+        elif phase == 1:
             # Phase 1: Core expression control heads (based on RegulonDB data)
             bacterial_heads = [
-                ("promoter_strength", PromoterStrengthHead(
+                ("gene_expression_control", PromoterStrengthHead(
                     self.dim_1bp, self.dim_128bp, num_conditions=50  # RegulonDB conditions
                 )),
-                ("rbs_efficiency", RBSEfficiencyHead(self.dim_1bp)),
-                ("operon_coregulation", OperonCoregulationHead(
+                ("translation_efficiency", RBSEfficiencyHead(self.dim_1bp)),
+                ("gene_coregulation", OperonCoregulationHead(
                     self.dim_128bp, self.dim_contacts, num_coexpression_tracks=20
                 )),
             ]
+            
+            for head_name, head in bacterial_heads:
+                self.add_head(organism, head_name, head)
+                
         elif phase == 2:
             # Phase 2: Add advanced regulation heads
             bacterial_heads = [
-                ("promoter_strength", PromoterStrengthHead(
+                ("gene_expression_control", PromoterStrengthHead(
                     self.dim_1bp, self.dim_128bp, num_conditions=50
                 )),
-                ("rbs_efficiency", RBSEfficiencyHead(self.dim_1bp)),
-                ("operon_coregulation", OperonCoregulationHead(
+                ("translation_efficiency", RBSEfficiencyHead(self.dim_1bp)),
+                ("gene_coregulation", OperonCoregulationHead(
                     self.dim_128bp, self.dim_contacts, num_coexpression_tracks=20
                 )),
                 ("riboswitch_binding", RiboswitchBindingHead(
                     self.dim_1bp, self.dim_128bp, num_ligands=30
                 )),
-                ("srna_targets", SRNATargetHead(
+                ("srna_target_prediction", SRNATargetHead(
                     self.dim_1bp, self.dim_128bp, num_srnas=100
                 )),
             ]
+            
+            for head_name, head in bacterial_heads:
+                self.add_head(organism, head_name, head)
+                
         elif phase == 3:
             # Phase 3: All heads including systems-level
             bacterial_heads = [
-                ("promoter_strength", PromoterStrengthHead(
+                ("gene_expression_control", PromoterStrengthHead(
                     self.dim_1bp, self.dim_128bp, num_conditions=50
                 )),
-                ("rbs_efficiency", RBSEfficiencyHead(self.dim_1bp)),
-                ("operon_coregulation", OperonCoregulationHead(
+                ("translation_efficiency", RBSEfficiencyHead(self.dim_1bp)),
+                ("gene_coregulation", OperonCoregulationHead(
                     self.dim_128bp, self.dim_contacts, num_coexpression_tracks=20
                 )),
                 ("riboswitch_binding", RiboswitchBindingHead(
                     self.dim_1bp, self.dim_128bp, num_ligands=30
                 )),
-                ("srna_targets", SRNATargetHead(
+                ("srna_target_prediction", SRNATargetHead(
                     self.dim_1bp, self.dim_128bp, num_srnas=100
                 )),
                 ("transcription_termination", TerminationHead(self.dim_1bp)),
-                ("pathway_activity", PathwayActivityHead(
+                ("metabolic_pathway_activity", PathwayActivityHead(
                     self.dim_128bp, self.dim_contacts, num_pathways=200
                 )),
-                ("secretion_signals", SecretionSignalHead(
+                ("protein_secretion_signals", SecretionSignalHead(
                     self.dim_1bp, num_secretion_types=8
                 )),
             ]
+            
+            for head_name, head in bacterial_heads:
+                self.add_head(organism, head_name, head)
+                
         else:
-            raise ValueError(f"Unsupported phase: {phase}. Must be 1, 2, or 3.")
-        
-        for head_name, head in bacterial_heads:
-            self.add_head(organism, head_name, head)
+            raise ValueError(f"Unsupported phase: {phase}. Must be 0, 1, 2, or 3.")
     
     def get_embeds(
         self,

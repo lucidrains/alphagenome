@@ -10,7 +10,7 @@ import logging
 from tqdm import tqdm
 from accelerate import Accelerator
 from .losses import BacterialLossFunction
-from ..model.heads import RealisticBacterialLossFunction
+from ..model.heads import RegulonDBLossFunction
 
 
 class BactaGenomeTrainer:
@@ -35,7 +35,7 @@ class BactaGenomeTrainer:
         # Use improved AlphaGenome-style loss by default
         if loss_function is None:
             if use_alphgenome_loss:
-                self.loss_function = RealisticBacterialLossFunction(use_alphgenome_loss=True)
+                self.loss_function = RegulonDBLossFunction(use_alphgenome_loss=True)
             else:
                 self.loss_function = BacterialLossFunction()
         else:

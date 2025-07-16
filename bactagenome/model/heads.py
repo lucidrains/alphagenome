@@ -450,15 +450,15 @@ class SecretionSignalHead(nn.Module):
         return torch.sigmoid(signal_logits)  # Multi-label classification
 
 
-class RealisticBacterialHeadManager(nn.ModuleDict):
+class RegulonDBHeadManager(nn.ModuleDict):
     """
-    Head manager for realistic bacterial genomics targets
+    Head manager for RegulonDB-based bacterial genomics targets
     Uses achievable prediction tasks based on actual RegulonDB data analysis
     Compatible with existing BactaGenome model interface by inheriting from ModuleDict
     """
     
     def __init__(self, dim_1bp: int, dim_128bp: int, organism_name: str):
-        # Initialize with realistic heads
+        # Initialize with RegulonDB-based heads
         heads_dict = {
             'gene_expression': GeneExpressionHead(dim_1bp),
             'gene_density': GeneDensityHead(dim_128bp), 
@@ -513,9 +513,9 @@ class RealisticBacterialHeadManager(nn.ModuleDict):
         }
 
 
-class RealisticBacterialLossFunction(nn.Module):
+class RegulonDBLossFunction(nn.Module):
     """
-    Loss function for realistic bacterial genomics targets
+    Loss function for RegulonDB-based bacterial genomics targets
     Uses AlphaGenome-inspired loss functions for better training
     """
     
@@ -611,9 +611,9 @@ class RealisticBacterialLossFunction(nn.Module):
         return total_loss, individual_losses
 
 
-def create_realistic_bacterial_heads(dim_1bp: int, dim_128bp: int, organism_name: str) -> RealisticBacterialHeadManager:
+def create_regulondb_bacterial_heads(dim_1bp: int, dim_128bp: int, organism_name: str) -> RegulonDBHeadManager:
     """
-    Factory function to create realistic bacterial heads
+    Factory function to create RegulonDB-based bacterial heads
     
     Args:
         dim_1bp: Dimension of 1bp embeddings
@@ -621,18 +621,18 @@ def create_realistic_bacterial_heads(dim_1bp: int, dim_128bp: int, organism_name
         organism_name: Name of organism
         
     Returns:
-        RealisticBacterialHeadManager instance
+        RegulonDBHeadManager instance
     """
-    return RealisticBacterialHeadManager(
+    return RegulonDBHeadManager(
         dim_1bp=dim_1bp,
         dim_128bp=dim_128bp,
         organism_name=organism_name
     )
 
 
-def integrate_realistic_heads_with_model(model, organism_name: str):
+def integrate_regulondb_heads_with_model(model, organism_name: str):
     """
-    Replace model heads with realistic bacterial heads
+    Replace model heads with RegulonDB-based bacterial heads
     
     Args:
         model: BactaGenome model instance
@@ -660,9 +660,9 @@ def integrate_realistic_heads_with_model(model, organism_name: str):
             'head_forward_arg_maps': model.head_forward_arg_maps[organism_name] if hasattr(model, 'head_forward_arg_maps') else {}
         }
         
-        # Replace with realistic heads
-        realistic_head_manager = create_realistic_bacterial_heads(dim_1bp, dim_128bp, organism_name)
-        model.heads[organism_name] = realistic_head_manager
+        # Replace with RegulonDB-based heads
+        regulondb_head_manager = create_regulondb_bacterial_heads(dim_1bp, dim_128bp, organism_name)
+        model.heads[organism_name] = regulondb_head_manager
         
         # Update head configuration for new heads
         if hasattr(model, 'head_forward_arg_names'):
@@ -679,6 +679,6 @@ def integrate_realistic_heads_with_model(model, organism_name: str):
                 'operon_membership': {}
             }
         
-        print(f"Replaced {organism_name} heads with realistic bacterial heads (1bp={dim_1bp}, 128bp={dim_128bp})")
+        print(f"Replaced {organism_name} heads with RegulonDB-based bacterial heads (1bp={dim_1bp}, 128bp={dim_128bp})")
     else:
         print(f"Warning: No existing heads found for {organism_name}")
