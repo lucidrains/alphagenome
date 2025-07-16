@@ -1,0 +1,127 @@
+# Phase 1 Training Configuration for RegulonDB Data
+# BactaGenome: E. coli K-12 with real RegulonDB data
+
+# Model architecture - optimized for Phase 1
+model:
+  dims: [64, 80, 96, 112, 128, 144, 160]  # U-Net channel dimensions
+  context_length: 98304                             # 100K bp sequences (AlphaGenome style)
+  num_organisms: 1                                  # Phase 1: E. coli only
+  
+  # Transformer hyperparameters (must match TransformerTower.__init__)
+  transformer_kwargs:
+    depth: 2                                        # AlphaGenome-like depth
+    heads: 2                                        # Attention heads
+    dim_head_qk: 64                               # Query/Key head dimension
+    dim_head_v: 96                                # Value head dimension
+    dropout: 0.1                                   # Dropout rate
+    max_positions: 8192                            # Max sequence positions
+
+# Training hyperparameters - AlphaGenome-aligned parameters
+training:
+  epochs: 32                                        # More epochs for real data
+  # AlphaGenome uses batch_size: 64, but smaller here due to memory constraints
+  batch_size: 2                                    # Smaller batch due to large sequences
+  learning_rate: 0.004                            # AlphaGenome peak learning rate (was 1e-4)
+  # AlphaGenome uses weight_decay: 0.4, but we use smaller due to limited data
+  weight_decay: 0.1                               # L2 regularization (increased from 0.01)
+  gradient_accumulation_steps: 4                   # Effective batch size = 4 (AlphaGenome: 64)
+  mixed_precision: "no"                          # Memory optimization
+  
+  # Gradient clipping for stability with AlphaGenome-style loss
+  max_grad_norm: 1.0                              # Clip gradients to prevent explosion
+  
+  # Loss weights - Phase 1 data-driven targets (realistic, achievable)
+  # See docs/OUTPUT_MODALITIES.md for detailed explanation of target evolution
+  loss_weights:
+    gene_expression: 1.0                           # Log-normalized TPM/FPKM from RegulonDB RNA-seq (replaces promoter_strength)
+    gene_density: 1.0                             # Gene count per 128bp genomic bin (proxy for rbs_efficiency)
+    operon_membership: 1.0                        # Binary operon classification (simplified operon_coregulation)
+  
+  # Training schedule
+  val_interval: 5                                  # Validate every 5 epochs
+  checkpoint_interval: 10                          # Save checkpoint every 10 epochs
+  log_interval: 10                                 # Log every 10 steps
+  
+  # Optimization - AlphaGenome style
+  # AlphaGenome uses 5,000 warmup steps out of 15,000 total
+  warmup_steps: 1000                               # Warmup schedule (increased from 500)
+  scheduler: "cosine_with_warmup"                  # Learning rate schedule with warmup
+  total_steps: 3000                                # Total training steps (for LR schedule)
+  
+  # Hardware and performance
+  num_workers: 2                                   # Data loading workers
+  use_wandb: false                                 # Weights & Biases logging
+  
+  # Directories
+  checkpoint_dir: "checkpoints/phase1_regulondb"
+  log_dir: "logs/phase1_regulondb"
+  
+  # Reproducibility
+  seed: 42
+
+# Data configuration
+data:
+  seq_len: 98304                                   # Must match model.context_length
+  
+  # Data processing
+  window_overlap: 0.8                              # 10% overlap between windows
+  min_genes_per_window: 1                          # Minimum genes for valid window
+  
+  # AlphaGenome-style data augmentation (adapted for bacterial genomes)
+  augmentation:
+    enable: true                                   # Enable data augmentation for training
+    shift_range: 256                               # ±256bp shifts (reduced from AlphaGenome's ±1024bp for bacterial scale)
+    reverse_complement_prob: 0.5                   # 50% probability of reverse complement
+    circular_genome: true                          # Treat bacterial genome as circular
+  
+  # Chromosome-based cross-validation (following plan.md)
+  cv_strategy: "chromosome_based"
+  train_angles: [0, 270]                           # 0° to 270° for training
+  val_angles: [270, 360]                           # 270° to 360° for validation
+
+# Target organisms for Phase 1
+organisms:
+  - "E_coli_K12"                                   # Phase 1: single organism
+
+# Phase indicator
+phase: 1
+
+# RegulonDB specific settings
+regulondb:
+  # Expression data
+  max_conditions: 50                               # Limit expression conditions
+  expression_threshold: 0.1                       # Minimum expression level
+  
+  # Gene filtering
+  min_gene_length: 100                             # Minimum gene length (bp)
+  max_gene_length: 5000                            # Maximum gene length (bp)
+  
+  # Operon filtering  
+  min_operon_genes: 2                              # Minimum genes per operon
+  max_operon_length: 10000                         # Maximum operon length (bp)
+  
+  # Data quality
+  require_sequence: true                           # Require gene sequences
+  require_expression: false                        # Don't require expression (many genes lack it)
+  
+  # Co-expression tracks
+  num_coexpression_tracks: 20                      # Number of co-expression patterns
+
+# Performance targets (from plan.md)
+targets:
+  promoter_prediction_r2: 0.75                    # R² ≥ 0.75
+  rbs_efficiency_r2: 0.80                         # R² ≥ 0.80  
+  operon_prediction_auroc: 0.90                   # AUROC ≥ 0.90
+  
+# Hardware requirements
+hardware:
+  min_gpu_memory: "40GB"                           # Minimum GPU memory
+  recommended_gpus: 4                              # A800 × 4 from plan.md
+  estimated_training_time: "2-3 days"             # From plan.md
+
+# Success criteria for Phase 1
+success_criteria:
+  - "Stable training convergence"
+  - "Promoter/RBS prediction R² > 0.7"
+  - "Training pipeline validation"
+  - "Model ready for Phase 2 expansion"

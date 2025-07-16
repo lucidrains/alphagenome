@@ -48,7 +48,7 @@ def setup_logging():
 def parse_args():
     """Parse command line arguments"""
     parser = argparse.ArgumentParser(description="Train BactaGenome with RegulonDB data")
-    parser.add_argument("--config", type=str, default="configs/training/phase1_regulondb.yaml",
+    parser.add_argument("--config", type=str, default="configs/training/phase1_regulondb_reduced.yaml",
                         help="Path to training configuration file")
     parser.add_argument("--regulondb-path", type=str, 
                         default="./data/raw/RegulonDB",
