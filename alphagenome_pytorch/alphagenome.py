@@ -1231,7 +1231,7 @@ class SoftClip(Module):
 
     def forward(self, x):
         threshold, scale, gamma = self.threshold, self.scale, self.gamma
-        return torch.where(x > threshold, scale * torch.sqrt(x * gamma).sqrt() - threshold, x)
+        return torch.where(x > threshold, scale * torch.sqrt(x * gamma) - threshold, x)
 
 class TargetScaler(Module):
     def __init__(
