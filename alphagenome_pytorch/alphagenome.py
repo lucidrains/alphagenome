@@ -6,7 +6,7 @@ from collections import namedtuple, defaultdict
 
 import torch
 import torch.distributed as dist
-from torch import tensor, is_tensor, arange, nn, cat, stack, arange, logspace, Tensor
+from torch import tensor, is_tensor, arange, nn, cat, stack, logspace, Tensor
 import torch.nn.functional as F
 from torch.nn import Conv1d, Linear, Sequential, Module, ModuleList, LayerNorm, ModuleDict
 
@@ -132,25 +132,25 @@ class MultinomialLoss(Module):
 
         return poisson_loss / self.resolution + positional_loss * self.positional_loss_weight
 
-
 class SoftClip(Module):
     def __init__(
-        self, 
-        threshold = 10.0
+        self,
+        scale = 2.,
+        gamma = 10.,
+        threshold = 10.
     ):
         super().__init__()
+        self.scale = scale
+        self.gamma = gamma
         self.threshold = threshold
 
-    def forward(
-        self, 
-        x: torch.Tensor
-    ):
-        x = torch.where(
-            x > self.threshold,
-            2 * torch.sqrt(x * self.threshold) - self.threshold,
-            x
-        )
-        return x
+    def inverse(self, clipped):
+        threshold, scale, gamma = self.threshold, self.scale, self.gamma
+        return torch.where(clipped > threshold, ((clipped + threshold) ** 2) / (gamma * scale ** 2), clipped)
+
+    def forward(self, x):
+        threshold, scale, gamma = self.threshold, self.scale, self.gamma
+        return torch.where(x > threshold, scale * torch.sqrt(x * gamma) - threshold, x)
 
 class MultinomialCrossEntropy(Module):
     def __init__(
@@ -172,12 +172,14 @@ class PoissonLoss(Module):
         self,
         dim = -1,
         eps = 1e-7,
+        softclip_scale = 2.,
+        softclip_gamma = 10.,
         softclip_threshold = 10.
     ):
         super().__init__()
         self.dim = dim
         self.eps = eps
-        self.softclip = SoftClip(softclip_threshold)
+        self.softclip = SoftClip(softclip_scale, softclip_gamma, softclip_threshold)
 
     def forward(self, pred, target):
         sum_pred = pred.sum(dim = self.dim)
@@ -187,14 +189,16 @@ class PoissonLoss(Module):
 class JunctionsLoss(Module):
     def __init__(
         self, 
+        softclip_scale = 2.,
+        softclip_gamma = 10.,
         softclip_threshold = 10.
     ):
         super().__init__()
         self.multinomial_cross_entropy_row = MultinomialCrossEntropy(dim = 0)
         self.multinomial_cross_entropy_col = MultinomialCrossEntropy(dim = 1)
 
-        self.poisson_loss_row = PoissonLoss(dim = 0, softclip_threshold = softclip_threshold)
-        self.poisson_loss_col = PoissonLoss(dim = 1, softclip_threshold = softclip_threshold)
+        self.poisson_loss_row = PoissonLoss(dim = 0, softclip_scale = softclip_scale, softclip_gamma = softclip_gamma, softclip_threshold = softclip_threshold)
+        self.poisson_loss_col = PoissonLoss(dim = 1, softclip_scale = softclip_scale, softclip_gamma = softclip_gamma, softclip_threshold = softclip_threshold)
 
     def forward(
         self, 
@@ -235,7 +239,7 @@ def get_maybe_dist_var(
     numel = tensor(t[..., 0].numel(), device = device)
     dist.all_reduce(numel)
 
-    summed = stats.sum(dim = 0)
+    summed = t.sum(dim = 0)
     dist.all_reduce(summed)
 
     mean = summed / numel
@@ -1212,26 +1216,6 @@ class TracksScaledPrediction(Module):
     ):
         track_pred = self.to_pred(x)
         return F.softplus(track_pred) * F.softplus(self.scale)
-
-class SoftClip(Module):
-    def __init__(
-        self,
-        scale = 2.,
-        gamma = 10.,
-        threshold = 10.
-    ):
-        super().__init__()
-        self.scale = scale
-        self.gamma = gamma
-        self.threshold = threshold
-
-    def inverse(self, clipped):
-        threshold, scale, gamma = self.threshold, self.scale, self.gamma
-        return torch.where(clipped > threshold, ((clipped + threshold) ** 2) / (gamma * scale ** 2), clipped)
-
-    def forward(self, x):
-        threshold, scale, gamma = self.threshold, self.scale, self.gamma
-        return torch.where(x > threshold, scale * torch.sqrt(x * gamma) - threshold, x)
 
 class TargetScaler(Module):
     def __init__(
