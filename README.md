@@ -117,14 +117,26 @@ Vibe coding with some attention network is totally welcomed, if it works
 
 ```bibtex
 @article {avsec2025alphagenome,
-    title = {AlphaGenome: advancing regulatory variant effect prediction with a unified DNA sequence model},
-    author = {Avsec, {\v Z}iga and Latysheva, Natasha and Cheng, Jun and Novati, Guido and Taylor, Kyle R. and Ward, Tom and Bycroft, Clare and Nicolaisen, Lauren and Arvaniti, Eirini and Pan, Joshua and Thomas, Raina and Dutordoir, Vincent and Perino, Matteo and De, Soham and Karollus, Alexander and Gayoso, Adam and Sargeant, Toby and Mottram, Anne and Wong, Lai Hong and Drot{\'a}r, Pavol and Kosiorek, Adam and Senior, Andrew and Tanburn, Richard and Applebaum, Taylor and Basu, Souradeep and Hassabis, Demis and Kohli, Pushmeet},
+    title   = {AlphaGenome: advancing regulatory variant effect prediction with a unified DNA sequence model},
+    author  = {Avsec, {\v Z}iga and Latysheva, Natasha and Cheng, Jun and Novati, Guido and Taylor, Kyle R. and Ward, Tom and Bycroft, Clare and Nicolaisen, Lauren and Arvaniti, Eirini and Pan, Joshua and Thomas, Raina and Dutordoir, Vincent and Perino, Matteo and De, Soham and Karollus, Alexander and Gayoso, Adam and Sargeant, Toby and Mottram, Anne and Wong, Lai Hong and Drot{\'a}r, Pavol and Kosiorek, Adam and Senior, Andrew and Tanburn, Richard and Applebaum, Taylor and Basu, Souradeep and Hassabis, Demis and Kohli, Pushmeet},
     elocation-id = {2025.06.25.661532},
-    year = {2025},
-    doi = {10.1101/2025.06.25.661532},
+    year    = {2025},
+    doi     = {10.1101/2025.06.25.661532},
     publisher = {Cold Spring Harbor Laboratory},
-    URL = {https://www.biorxiv.org/content/early/2025/06/27/2025.06.25.661532},
-    eprint = {https://www.biorxiv.org/content/early/2025/06/27/2025.06.25.661532.full.pdf},
+    URL     = {https://www.biorxiv.org/content/early/2025/06/27/2025.06.25.661532},
+    eprint  = {https://www.biorxiv.org/content/early/2025/06/27/2025.06.25.661532.full.pdf},
     journal = {bioRxiv}
+}
+```
+
+```bibtex
+@misc{gopalakrishnan2025decouplingwhatwherepolar,
+    title   = {Decoupling the "What" and "Where" With Polar Coordinate Positional Embeddings}, 
+    author  = {Anand Gopalakrishnan and Robert Csordás and Jürgen Schmidhuber and Michael C. Mozer},
+    year    = {2025},
+    eprint  = {2509.10534},
+    archivePrefix = {arXiv},
+    primaryClass = {cs.LG},
+    url     = {https://arxiv.org/abs/2509.10534}, 
 }
 ```

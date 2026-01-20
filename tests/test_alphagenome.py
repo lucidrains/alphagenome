@@ -1,10 +1,12 @@
 import pytest
+param = pytest.mark.parametrize
 
 import torch
 from alphagenome_pytorch.alphagenome import TransformerTower
 
-def test_attention():
-    transformer = TransformerTower(dim = 768, dim_pairwise = 128)
+@param('polar_pos_emb', (False, True))
+def test_attention(polar_pos_emb):
+    transformer = TransformerTower(dim = 768, dim_pairwise = 128, polar_pos_emb = polar_pos_emb)
 
     single = torch.randn(2, 512, 768)
 

@@ -12,6 +12,8 @@ from torch.nn import Conv1d, Linear, Sequential, Module, ModuleList, LayerNorm, 
 
 from torch.nn.utils.parametrize import register_parametrization
 
+from torch.amp import autocast
+
 from einx import add, multiply, greater
 from einops.layers.torch import Rearrange, Reduce
 from einops import rearrange, repeat, reduce, einsum
@@ -469,6 +471,7 @@ class RotaryEmbedding(Module):
         inv_freq = 1. / (arange(num_freqs).float() + logspace(1, max_positions - num_freqs + 1, num_freqs))
         self.register_buffer('inv_freq', inv_freq)
 
+    @autocast('cuda', enabled = False)
     def forward(
         self,
         seq_len
@@ -482,6 +485,7 @@ def rotate_half(x):
     x1, x2 = x.chunk(2, dim = -1)
     return torch.cat((-x2, x1), dim = -1)
 
+@autocast('cuda', enabled = False)
 def apply_rotary_pos_emb(pos, t):
     return t * pos.cos() + rotate_half(t) * pos.sin()
 
@@ -515,6 +519,53 @@ class RelativePosFeatures(Module):
         embeds = greater('j, i -> i j', center_widths, abs_rel_pos).float()
 
         return cat((embeds, multiply('i, i j', rel_pos_sign, embeds)), dim = -1)
+
+# Polar embeddings
+# Gopalakrishnan et al. https://arxiv.org/abs/2509.10534
+
+class PolarEmbedding(Module):
+    def __init__(
+        self,
+        dim,
+        heads,
+        bias_uniform_init = False,
+        max_positions = 8192
+    ):
+        super().__init__()
+        num_freqs = dim
+        inv_freq = 1. / (arange(num_freqs).float() + logspace(1, max_positions - num_freqs + 1, num_freqs))
+        self.register_buffer('inv_freq', inv_freq)
+
+        self.learned_bias = nn.Parameter(torch.zeros(heads, 1, dim))
+
+        if bias_uniform_init:
+            self.learned_bias.uniform_(-2. * torch.pi, 0.)
+
+    @autocast('cuda', enabled = False)
+    def forward(
+        self,
+        seq_len,
+    ):
+        device = self.inv_freq.device
+        t = arange(seq_len, device = device).type(self.inv_freq.dtype)
+
+        freqs = einsum(t, self.inv_freq, 'i, j -> i j')
+
+        bias = self.learned_bias.clamp(-2. * torch.pi, 0.)
+
+        return freqs, bias
+
+@autocast('cuda', enabled = False)
+def apply_polar_pos_emb(freqs, t):
+    orig_dtype = t.dtype
+
+    t = t.float()
+
+    t = F.softplus(t)
+
+    out = cat((t * freqs.cos(), t * freqs.sin()), dim = -1)
+
+    return out.type(orig_dtype)
 
 # prenorm and sandwich norm - they use sandwich norm for single rep, prenorm for pairwise rep
 
@@ -609,7 +660,8 @@ class Attention(Module):
         self,
         x,
         pairwise = None, # Float['b i j dp']
-        rotary_emb = None
+        rotary_emb = None,
+        polar_emb = None
     ):
 
         q, k, v = self.to_qkv(x).split(self.qkv_dim_splits, dim = -1)
@@ -622,6 +674,13 @@ class Attention(Module):
         q, k, v = self.q_norm(q), self.k_norm(k), self.v_norm(v)
 
         q = q * self.scale
+
+        # maybe polar
+
+        if exists(polar_emb):
+            freqs, bias = polar_emb
+            q = apply_polar_pos_emb(freqs, q)
+            k = apply_polar_pos_emb(freqs + bias, k)
 
         # maybe rotary
 
@@ -653,6 +712,7 @@ class Attention(Module):
         out = einsum(attn, v, 'b g h i j, b h j d -> b g h i d')
 
         out = self.merge_heads(out)
+
         return self.to_out(out)
 
 # single to pairwise
@@ -784,6 +844,7 @@ class TransformerTower(Module):
         dim_head_v = 192,
         dropout = 0.,
         ff_expansion_factor = 2.,
+        polar_pos_emb = False,
         max_positions = 8192,
         dim_pairwise = 128,
         pairwise_every_num_single_blocks = 2,   # how often to do a pairwise block
@@ -801,7 +862,14 @@ class TransformerTower(Module):
 
         self.rel_pos_features = RelativePosFeatures(pool_size)
 
-        self.rotary_emb = RotaryEmbedding(dim_head_qk, max_positions = max_positions)
+        self.polar_pos_emb = polar_pos_emb
+
+        self.rotary_emb, self.polar_emb = None, None
+
+        if polar_pos_emb:
+            self.polar_emb = PolarEmbedding(dim_head_qk, heads = 1, max_positions = max_positions)
+        else:
+            self.rotary_emb = RotaryEmbedding(dim_head_qk, max_positions = max_positions)
 
         for layer_index in range(depth):
 
@@ -852,7 +920,12 @@ class TransformerTower(Module):
 
         rel_pos_feats = self.rel_pos_features(single)
 
-        rotary_emb = self.rotary_emb(seq_len)
+        if self.polar_pos_emb:
+            polar_emb = self.polar_emb(seq_len)
+            pos_emb = dict(polar_emb = polar_emb)
+        else:
+            rotary_emb = self.rotary_emb(seq_len)
+            pos_emb = dict(rotary_emb = rotary_emb)
 
         for (
             attn,
@@ -867,7 +940,7 @@ class TransformerTower(Module):
                 pairwise = maybe_pairwise_attn(pairwise) + pairwise
                 pairwise = maybe_pairwise_ff(pairwise) + pairwise
 
-            single = attn(single, rotary_emb = rotary_emb, pairwise = pairwise) + single
+            single = attn(single,  pairwise = pairwise, **pos_emb) + single
             single = ff(single) + single
 
         return single, pairwise
