@@ -779,7 +779,7 @@ class SingleToPairwise(Module):
 
         outer_sum = add('b i d, b j d -> b i j d', outer_q, outer_k)
 
-        return outer_sum
+        return outer_sum + pairwise_from_sim
 
 # pairwise attention is a single headed attention across rows, they said columns did not help
 
