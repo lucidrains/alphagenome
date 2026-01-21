@@ -18,6 +18,9 @@ from einx import add, multiply, greater
 from einops.layers.torch import Rearrange, Reduce
 from einops import rearrange, repeat, reduce, einsum
 
+from torch_einops_utils import pack_with_inverse
+from PoPE_pytorch import PoPE, compute_attn_similarity
+
 # ein notation
 
 # b - batch
@@ -523,49 +526,6 @@ class RelativePosFeatures(Module):
 # Polar embeddings
 # Gopalakrishnan et al. https://arxiv.org/abs/2509.10534
 
-class PolarEmbedding(Module):
-    def __init__(
-        self,
-        dim,
-        heads,
-        bias_uniform_init = False,
-        max_positions = 8192
-    ):
-        super().__init__()
-        num_freqs = dim
-        inv_freq = 1. / (arange(num_freqs).float() + logspace(1, max_positions - num_freqs + 1, num_freqs))
-        self.register_buffer('inv_freq', inv_freq)
-
-        self.learned_bias = nn.Parameter(torch.zeros(heads, 1, dim))
-
-        if bias_uniform_init:
-            self.learned_bias.uniform_(-2. * torch.pi, 0.)
-
-    @autocast('cuda', enabled = False)
-    def forward(
-        self,
-        seq_len,
-    ):
-        device = self.inv_freq.device
-        t = arange(seq_len, device = device).type(self.inv_freq.dtype)
-
-        freqs = einsum(t, self.inv_freq, 'i, j -> i j')
-
-        bias = self.learned_bias.clamp(-2. * torch.pi, 0.)
-
-        return freqs, bias
-
-@autocast('cuda', enabled = False)
-def apply_polar_pos_emb(freqs, t):
-    orig_dtype = t.dtype
-
-    t = t.float()
-
-    t = F.softplus(t)
-
-    out = cat((t * freqs.cos(), t * freqs.sin()), dim = -1)
-
-    return out.type(orig_dtype)
 
 # prenorm and sandwich norm - they use sandwich norm for single rep, prenorm for pairwise rep
 
@@ -675,21 +635,21 @@ class Attention(Module):
 
         q = q * self.scale
 
-        # maybe polar
-
-        if exists(polar_emb):
-            freqs, bias = polar_emb
-            q = apply_polar_pos_emb(freqs, q)
-            k = apply_polar_pos_emb(freqs + bias, k)
-
-        # maybe rotary
-
         if exists(rotary_emb):
             q, k = tuple(apply_rotary_pos_emb(rotary_emb, t) for t in (q, k))
 
         # similarities
 
-        sim = einsum(q, k, 'b g h i d, b h j d -> b g h i j')
+        if exists(polar_emb):
+            groups = q.shape[1] // k.shape[1]
+
+            q, inverse_pack = pack_with_inverse(q, 'b * n d')
+            k = rearrange(k, 'b h n d -> b h n d')
+
+            sim = compute_attn_similarity(q, k, polar_emb)
+            sim = inverse_pack(sim, 'b * i j')
+        else:
+            sim = einsum(q, k, 'b g h i d, b h j d -> b g h i j')
 
         # add attention bias + softclamping
 
@@ -867,7 +827,7 @@ class TransformerTower(Module):
         self.rotary_emb, self.polar_emb = None, None
 
         if polar_pos_emb:
-            self.polar_emb = PolarEmbedding(dim_head_qk, heads = 1, max_positions = max_positions)
+            self.polar_emb = PoPE(dim_head_qk, heads = 1)
         else:
             self.rotary_emb = RotaryEmbedding(dim_head_qk, max_positions = max_positions)
 

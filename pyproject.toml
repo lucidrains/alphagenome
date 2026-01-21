@@ -1,12 +1,12 @@
 [project]
 name = "alphagenome-pytorch"
-version = "0.2.2"
+version = "0.2.3"
 description = "AlphaGenome"
 authors = [
     { name = "Phil Wang", email = "lucidrains@gmail.com" }
 ]
 readme = "README.md"
-requires-python = ">= 3.9"
+requires-python = ">= 3.10"
 license = { file = "LICENSE" }
 keywords = [
     'artificial intelligence',
@@ -29,6 +29,8 @@ dependencies = [
     "accelerate",
     "einx>=0.3.0",
     "einops>=0.8.0",
+    "PoPE-pytorch>=0.0.7",
+    "torch-einops-utils",
     "torch>=2.4",
 ]
 
@@ -37,7 +39,6 @@ Homepage = "https://pypi.org/project/alphagenome-pytorch/"
 Repository = "https://github.com/lucidrains/alphagenome"
 
 [project.optional-dependencies]
-examples = []
 test = [
     "pytest"
 ]
