@@ -1,6 +1,6 @@
 [project]
 name = "alphagenome-pytorch"
-version = "0.2.3"
+version = "0.2.4"
 description = "AlphaGenome"
 authors = [
     { name = "Phil Wang", email = "lucidrains@gmail.com" }
@@ -29,7 +29,7 @@ dependencies = [
     "accelerate",
     "einx>=0.3.0",
     "einops>=0.8.0",
-    "PoPE-pytorch>=0.0.7",
+    "PoPE-pytorch>=0.0.9",
     "torch-einops-utils",
     "torch>=2.4",
 ]

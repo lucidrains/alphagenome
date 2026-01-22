@@ -827,7 +827,9 @@ class TransformerTower(Module):
         self.rotary_emb, self.polar_emb = None, None
 
         if polar_pos_emb:
-            self.polar_emb = PoPE(dim_head_qk, heads = 1)
+            inv_freqs = 1. / (arange(dim_head_qk).float() + logspace(1, max_positions - dim_head_qk + 1, dim_head_qk))
+
+            self.polar_emb = PoPE(dim_head_qk, heads = 1, inv_freqs = inv_freqs)
         else:
             self.rotary_emb = RotaryEmbedding(dim_head_qk, max_positions = max_positions)
 
