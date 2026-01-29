@@ -4,6 +4,7 @@
 
 Implementation of [AlphaGenome](https://deepmind.google/discover/blog/alphagenome-ai-for-better-understanding-the-genome/), Deepmind's updated genomic attention model
 
+The [official code](https://github.com/google-deepmind/alphagenome_research) has been released!
 
 ## Appreciation
 
