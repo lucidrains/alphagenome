@@ -6,11 +6,9 @@ from collections import namedtuple, defaultdict
 
 import torch
 import torch.distributed as dist
-from torch import tensor, is_tensor, arange, nn, cat, stack, logspace, Tensor
+from torch import tensor, is_tensor, arange, nn, cat, stack, Tensor
 import torch.nn.functional as F
 from torch.nn import Conv1d, Linear, Sequential, Module, ModuleList, LayerNorm, ModuleDict
-
-from torch.nn.utils.parametrize import register_parametrization
 
 from torch.amp import autocast
 
@@ -65,6 +63,22 @@ publication_heads_config = {
     }
 }
 
+# Reference (JAX) head specs from the official checkpoint
+jax_genome_track_heads = {
+    'rna_seq': dict(num_tracks = 768, resolutions = (1, 128)),
+    'cage': dict(num_tracks = 640, resolutions = (1, 128)),
+    'dnase': dict(num_tracks = 384, resolutions = (1, 128)),
+    'procap': dict(num_tracks = 128, resolutions = (1, 128)),
+    'atac': dict(num_tracks = 256, resolutions = (1, 128)),
+    'chip_tf': dict(num_tracks = 1664, resolutions = (128,)),
+    'chip_histone': dict(num_tracks = 1152, resolutions = (128,)),
+}
+
+jax_contact_maps_tracks = 28
+jax_splice_usage_tracks = 734
+jax_splice_junction_hidden_dim = 768
+jax_splice_junction_max_tissues = 367
+
 # functions
 
 def exists(v):
@@ -102,6 +116,26 @@ def append_dims(t, ndims):
 
 def log(t, eps = 1e-7):
     return t.clamp(min = eps).log()
+
+def gelu_1702(x):
+    """Official AlphaGenome GELU variant: sigmoid(1.702 * x) * x"""
+    return torch.sigmoid(1.702 * x) * x
+
+class GELU1702(Module):
+    """Module wrapper for gelu_1702 activation."""
+    def forward(self, x):
+        return gelu_1702(x)
+
+def geomspace(start, stop, num, device = None):
+    """Return numbers spaced evenly on a log scale (geometric progression).
+
+    Matches numpy.geomspace / jax.numpy.geomspace behavior.
+    """
+    if num == 1:
+        return torch.tensor([start], device=device)
+    # Use log-linear interpolation: start * (stop/start)^(i/(num-1))
+    t = torch.linspace(0, 1, num, device=device)
+    return start * (stop / start) ** t
 
 def safe_div(num, den, eps = 1e-7):
     return num / den.clamp(min = eps)
@@ -238,10 +272,10 @@ def get_maybe_dist_var(
     calc_distributed_var = distributed and is_distributed()
 
     if not calc_distributed_var:
-        return t.var(dim = 0)
+        return t.var(dim = 0, unbiased = False)
 
     device = t.device
-    numel = tensor(t[..., 0].numel(), device = device)
+    numel = tensor(t[..., 0].numel(), device = device, dtype = t.dtype)
     dist.all_reduce(numel)
 
     summed = t.sum(dim = 0)
@@ -253,7 +287,7 @@ def get_maybe_dist_var(
     centered_squared_sum = centered.square().sum(dim = 0)
     dist.all_reduce(centered_squared_sum)
 
-    return centered_squared_sum / (numel - 1) # with correction
+    return centered_squared_sum / numel
 
 class BatchRMSNorm(Module):
     def __init__(
@@ -266,14 +300,12 @@ class BatchRMSNorm(Module):
         update_running_var = True
     ):
         super().__init__()
-        self.scale = dim_feat ** 0.5
-
         self.eps = eps
         self.momentum = 1. - momentum
         self.channel_first = channel_first
         self.distributed = distributed
 
-        self.gamma = nn.Parameter(torch.zeros(dim_feat))
+        self.gamma = nn.Parameter(torch.ones(dim_feat))
         self.beta = nn.Parameter(torch.zeros(dim_feat))
 
         self.update_running_var = update_running_var
@@ -308,11 +340,11 @@ class BatchRMSNorm(Module):
 
         # norm
 
-        batch_rmsnormed = x / std * self.scale
+        batch_rmsnormed = x / std
 
         # scale and offset
 
-        return batch_rmsnormed * (gamma + 1) + beta
+        return batch_rmsnormed * gamma + beta
 
 # for easier time freezing the running variance
 
@@ -332,19 +364,34 @@ class ChannelFirstRMSNorm(Module):
         dim
     ):
         super().__init__()
-        self.scale = dim ** 0.5
-        self.gamma = nn.Parameter(torch.zeros(dim))
+        self.gamma = nn.Parameter(torch.ones(dim))
+        self.beta = nn.Parameter(torch.zeros(dim))
 
     def forward(self, x):
         gamma = append_dims(self.gamma, x.ndim - 2)
-        return l2norm(x, dim = 1) * self.scale * (gamma + 1)
+        beta = append_dims(self.beta, x.ndim - 2)
+        var = x.square().mean(dim = 1, keepdim = True)
+        x = x * torch.rsqrt(var + 1e-5)
+        return x * gamma + beta
+
+class RMSNormWithBias(Module):
+    def __init__(self, dim, eps = 1e-5):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
+        self.bias = nn.Parameter(torch.zeros(dim))
+
+    def forward(self, x):
+        var = x.square().mean(dim = -1, keepdim = True)
+        x = x * torch.rsqrt(var + self.eps)
+        return x * self.weight + self.bias
 
 # function for determining which rmsnorm
 
 def RMSNorm(dim, channel_first = False, batch = False):
 
     if not batch and not channel_first:
-        return nn.RMSNorm(dim)
+        return RMSNormWithBias(dim)
     elif not batch and channel_first:
         return ChannelFirstRMSNorm(dim)
     else:
@@ -363,8 +410,6 @@ class WeightStandardConv(Conv1d):
     ):
         super().__init__(dim, dim_out, width, *args, **kwargs)
 
-        register_parametrization(self, 'weight', LayerNorm(self.weight.shape, elementwise_affine = False))
-
 class ConvBlock(Module):
     def __init__(
         self,
@@ -381,7 +426,7 @@ class ConvBlock(Module):
 
         self.net = nn.Sequential(
             RMSNorm(dim, channel_first = True, batch = batch_rmsnorm),
-            nn.GELU(),
+            GELU1702(),
             conv_klass(dim, dim_out, width, padding = width // 2)
         )
 
@@ -399,12 +444,12 @@ class DownresBlock(Module):
         dim_out = dim + channels_to_add
         self.pad = channels_to_add
 
-        self.conv = ConvBlock(dim, width = 1, dim_out = dim_out)
-        self.conv_out = ConvBlock(dim_out, width = 1)
+        self.conv = ConvBlock(dim, width = 5, dim_out = dim_out)
+        self.conv_out = ConvBlock(dim_out, width = 5)
 
         self.max_pool = Reduce('b d (n pool) -> b d n', 'max', pool = 2)
 
-    def forward(self, x):
+    def forward(self, x, return_pre_pool = False):
 
         residual = F.pad(x, (0, 0, 0, self.pad), value = 0.)
 
@@ -412,14 +457,17 @@ class DownresBlock(Module):
 
         out = self.conv_out(out) + out
 
-        return self.max_pool(out)
+        pooled = self.max_pool(out)
+        if return_pre_pool:
+            return pooled, out
+        return pooled
 
 class UpresBlock(Module):
     def __init__(
         self,
         dim,
         channels_to_remove = 128,
-        residual_scale_init = .9,
+        residual_scale_init = 1.,
         has_skip = True
     ):
         super().__init__()
@@ -427,10 +475,10 @@ class UpresBlock(Module):
         dim_out = dim - channels_to_remove
         self.pad = channels_to_remove
 
-        self.conv = ConvBlock(dim, width = 1, dim_out = dim_out)
-        self.unet_conv = ConvBlock(dim_out, width = 1) if has_skip else None
+        self.conv = ConvBlock(dim, width = 5, dim_out = dim_out)
+        self.unet_conv = ConvBlock(dim_out, width = 1) if has_skip else None  # skip conv stays width=1
 
-        self.conv_out = ConvBlock(dim_out, width = 1)
+        self.conv_out = ConvBlock(dim_out, width = 5)
 
         self.residual_scale = nn.Parameter(torch.ones(1,) * residual_scale_init)
 
@@ -471,22 +519,27 @@ class RotaryEmbedding(Module):
     ):
         super().__init__()
         num_freqs = dim // 2
-        inv_freq = 1. / (arange(num_freqs).float() + logspace(1, max_positions - num_freqs + 1, num_freqs))
+        inv_freq = 1. / (arange(num_freqs).float() + geomspace(1, max_positions - num_freqs + 1, num_freqs))
         self.register_buffer('inv_freq', inv_freq)
 
     @autocast('cuda', enabled = False)
     def forward(
         self,
-        seq_len
+        positions
     ):
         device = self.inv_freq.device
-        t = arange(seq_len, device = device).type_as(self.inv_freq)
-        freqs = einsum(t, self.inv_freq, 'i , j -> i j')
-        return cat((freqs, freqs), dim = -1)
+        if is_tensor(positions):
+            t = positions.to(device = device, dtype = self.inv_freq.dtype)
+            freqs = einsum(t, self.inv_freq, '... , j -> ... j')
+        else:
+            t = arange(positions, device = device).type_as(self.inv_freq)
+            freqs = einsum(t, self.inv_freq, 'i , j -> i j')
+        return freqs.repeat_interleave(2, dim = -1)
 
 def rotate_half(x):
-    x1, x2 = x.chunk(2, dim = -1)
-    return torch.cat((-x2, x1), dim = -1)
+    x1 = x[..., ::2]
+    x2 = x[..., 1::2]
+    return torch.stack((-x2, x1), dim = -1).flatten(-2)
 
 @autocast('cuda', enabled = False)
 def apply_rotary_pos_emb(pos, t):
@@ -495,9 +548,16 @@ def apply_rotary_pos_emb(pos, t):
 # 'central mask features' - relative positions for constituting pairwise rep
 
 class RelativePosFeatures(Module):
-    def __init__(self, pool_size = 16):
+    def __init__(
+        self,
+        pool_size = 16,
+        num_features = 32,
+        max_distance = 8192
+    ):
         super().__init__()
         self.pool_size = pool_size
+        self.num_features = num_features
+        self.max_distance = max_distance
         self.register_buffer('dummy', tensor(0))
 
     @property
@@ -506,16 +566,16 @@ class RelativePosFeatures(Module):
 
     def forward(self, single):
 
-        _, seq_len, dim = single.shape
+        _, seq_len, _ = single.shape
 
         seq_len //= self.pool_size
-        half_dim = dim // 2
+        max_seq_len = self.max_distance // self.pool_size
 
-        rel_pos = arange(2 * seq_len - 1, device = self.device) - (seq_len - 1)
+        rel_pos = arange(-seq_len, seq_len, device = self.device)
 
         center_widths = (
-            arange(half_dim, device = self.device) +
-            logspace(1, seq_len - half_dim + 1, half_dim + 1, device = self.device)[:-1] # endpoint = False
+            arange(self.num_features, device = self.device) +
+            geomspace(1, max_seq_len - self.num_features + 1, self.num_features + 1, device = self.device)[:-1]
         )
 
         abs_rel_pos, rel_pos_sign = rel_pos.abs(), rel_pos.sign()
@@ -571,13 +631,13 @@ class Attention(Module):
         dim_head_v = 192,
         dim_pairwise = None,
         softclamp_value = 5., # they employ attention softclamping
-        use_qk_rmsnorm = True,
+        use_qk_rmsnorm = False,  # official uses LayerNorm for q/k/v norms
         attn_bias_use_batch_rmsnorm = True
     ):
         super().__init__()
         dim_pairwise = default(dim_pairwise, dim)
 
-        self.scale = dim_head ** -0.5
+        self.scale = dim_head_qk ** -0.5
 
         qkv_proj_dim_out = (dim_head_qk * heads, dim_head_qk, dim_head_v)
 
@@ -594,11 +654,11 @@ class Attention(Module):
         # projections
 
         self.to_qkv = LinearNoBias(dim, sum(qkv_proj_dim_out))
-        self.to_out = LinearNoBias(dim_head_v * heads, dim)
+        self.to_out = Linear(dim_head_v * heads, dim)
 
         # they add layernorms to queries, keys, and interestingly enough, values as well. first time i've seen this
 
-        norm_klass = nn.RMSNorm if use_qk_rmsnorm else partial(LayerNorm, bias = False)
+        norm_klass = nn.RMSNorm if use_qk_rmsnorm else nn.LayerNorm
         self.q_norm = norm_klass(dim_head_qk)
         self.k_norm = norm_klass(dim_head_qk)
         self.v_norm = norm_klass(dim_head_v)
@@ -683,12 +743,16 @@ class SingleToPairwise(Module):
         dim,
         pool_size = 16,
         dim_pairwise = 128,
-        heads = 32
+        heads = 32,
+        rel_pos_features_dim = None
     ):
         super().__init__()
         self.avg_pool = Reduce('b (n pool) d -> b n d', 'mean', pool = pool_size)
+        self.norm = RMSNorm(dim)
 
         dim_inner = heads * dim_pairwise
+
+        rel_pos_features_dim = default(rel_pos_features_dim, heads * 2)
 
         self.split_heads = Rearrange('... (h d) -> ... h d', h = heads)
 
@@ -702,7 +766,7 @@ class SingleToPairwise(Module):
 
         # relative position related
 
-        self.to_rel_pos_encoding = Linear(dim, heads * dim_pairwise)
+        self.to_rel_pos_encoding = Linear(rel_pos_features_dim, heads * dim_pairwise)
         self.qk_rel_pos_bias = nn.Parameter(torch.zeros(2, 1, 1, heads, dim_pairwise))
 
     def forward(
@@ -712,6 +776,7 @@ class SingleToPairwise(Module):
     ):
 
         single = self.avg_pool(single)
+        single = self.norm(single)
 
         pool_seq_len = single.shape[1]
 
@@ -764,6 +829,7 @@ class PairwiseRowAttention(Module):
 
         # similarity
 
+        q = q * self.scale
         sim = einsum(q, k, 'b n i d, b n j d -> b n i j')
 
         # attention
@@ -798,7 +864,7 @@ class TransformerTower(Module):
         self,
         dim,
         *,
-        depth = 8,
+        depth = 9,
         heads = 8,
         dim_head_qk = 128,
         dim_head_v = 192,
@@ -820,14 +886,14 @@ class TransformerTower(Module):
 
         self.pairwise_every = pairwise_every_num_single_blocks
 
-        self.rel_pos_features = RelativePosFeatures(pool_size)
+        self.rel_pos_features = RelativePosFeatures(pool_size, num_features = single_to_pairwise_heads, max_distance = max_positions)
 
         self.polar_pos_emb = polar_pos_emb
 
         self.rotary_emb, self.polar_emb = None, None
 
         if polar_pos_emb:
-            inv_freqs = 1. / (arange(dim_head_qk).float() + logspace(1, max_positions - dim_head_qk + 1, dim_head_qk))
+            inv_freqs = 1. / (arange(dim_head_qk).float() + geomspace(1, max_positions - dim_head_qk + 1, dim_head_qk))
 
             self.polar_emb = PoPE(dim_head_qk, heads = 1, inv_freqs = inv_freqs)
         else:
@@ -847,11 +913,16 @@ class TransformerTower(Module):
             single_to_pairwise, pairwise_attn, pairwise_ff = None, None, None
 
             if divisible_by(layer_index, self.pairwise_every):
-                single_to_pairwise = SingleToPairwise(dim = dim, dim_pairwise = dim_pairwise, heads = single_to_pairwise_heads, pool_size = pool_size)
+                single_to_pairwise = SingleToPairwise(
+                    dim = dim,
+                    dim_pairwise = dim_pairwise,
+                    heads = single_to_pairwise_heads,
+                    pool_size = pool_size,
+                    rel_pos_features_dim = single_to_pairwise_heads * 2
+                )
                 pairwise_attn = PairwiseRowAttention(dim_pairwise)
                 pairwise_ff = FeedForward(dim = dim_pairwise, expansion_factor = ff_expansion_factor)
 
-                single_to_pairwise = NormWrapper(dim = dim, block = single_to_pairwise, dropout = dropout, use_batch_rmsnorm = False)
                 pairwise_attn = NormWrapper(dim = dim_pairwise, block = pairwise_attn, dropout = dropout, use_batch_rmsnorm = False)
                 pairwise_ff = NormWrapper(dim = dim_pairwise, block = pairwise_ff, dropout = dropout, use_batch_rmsnorm = False)
 
@@ -921,7 +992,7 @@ class TransformerUnet(Module):
             1408,
             1536
         ),
-        basepairs = 5,
+        basepairs = 4,  # 4 channels: A, C, G, T (official encoding)
         dna_embed_width = 15,
         transformer_kwargs: dict = dict()
     ):
@@ -935,10 +1006,9 @@ class TransformerUnet(Module):
         self.dna_embed = DNAEmbed(first_dim, dim_input = basepairs, width = dna_embed_width)
 
         dim_with_input = (basepairs, *dims)
-        dim_pairs = zip(dim_with_input[:-1], dim_with_input[1:])
+        dim_pairs = list(zip(dim_with_input[:-1], dim_with_input[1:]))
 
         downs = []
-        ups = []
 
         for layer_num, (dim_in, dim_out) in enumerate(dim_pairs, start = 1):
             is_first = layer_num == 1
@@ -951,13 +1021,20 @@ class TransformerUnet(Module):
                 down = DownresBlock(dim_in, channels_to_add = channel_diff)
                 downs.append(down)
 
-            up = UpresBlock(
-                dim_out,
-                channels_to_remove = channel_diff if not is_first else 0,
-                has_skip = not is_first
-            )
+        # Build ups to mirror JAX SequenceDecoder:
+        # first up keeps 1536 -> 1536, then reduces by 128 each step.
+        dims_rev = list(reversed(dims))
+        input_dims = [dims[-1]] + dims_rev[:-1]
 
-            ups.insert(0, up)
+        ups = []
+        for input_dim, output_dim in zip(input_dims, dims_rev):
+            channels_to_remove = input_dim - output_dim
+            up = UpresBlock(
+                input_dim,
+                channels_to_remove = channels_to_remove,
+                has_skip = True
+            )
+            ups.append(up)
 
         self.downs = ModuleList(downs)
         self.ups = ModuleList(ups)
@@ -977,14 +1054,15 @@ class TransformerUnet(Module):
         # embed with one hot and add skip
 
         dna_embed, skip = self.dna_embed(seq)
+        skips.append(skip)
 
         # downs
 
         x = dna_embed
 
         for down in self.downs:
-            skips.append(x)
-            x = down(x)
+            x, skip = down(x, return_pre_pool = True)
+            skips.append(skip)
 
         x = rearrange(x, 'b d n -> b n d')
 
@@ -1001,10 +1079,8 @@ class TransformerUnet(Module):
         
         x = rearrange(single, 'b n d -> b d n')
 
-        for i, up in enumerate(self.ups):
-            is_last = i == (len(self.ups) - 1)
-            skip = skips.pop() if not is_last else None
-
+        for up in self.ups:
+            skip = skips.pop()
             x = up(x, skip = skip)
             
         out = rearrange(x, 'b d n -> b n d') # 1D 1bp resolution
@@ -1017,14 +1093,14 @@ class DNAEmbed(Module):
     def __init__(
         self,
         dim,
-        dim_input = 5, # 5 basepairs
+        dim_input = 4, # 4 channels: A, C, G, T (official encoding)
         width = 15
     ):
         super().__init__()
         assert is_odd(width)
         self.dim_input = dim_input
         self.conv = Conv1d(dim_input, dim, width, padding = width // 2)
-        self.pointwise = Conv1d(dim, dim, 1)
+        self.pointwise = ConvBlock(dim, width = 5)
 
         self.pool = Reduce('b d (n pool) -> b d n', 'max', pool = 2)
 
@@ -1039,7 +1115,7 @@ class DNAEmbed(Module):
         out = out + self.pointwise(out)
         pooled = self.pool(out) # think they downsample for dna embed block
 
-        return pooled, x
+        return pooled, out
 
 class OrganismEmbedding(Module):
     def __init__(
@@ -1069,7 +1145,7 @@ class OutputEmbedding(Module):
         self.skip_proj = LinearNoBias(skip_dim, 2 * input_dim) if exists(skip_dim) else None
         self.norm = RMSNorm(2 * input_dim, batch = use_batch_rmsnorm)
         self.embed = nn.Embedding(num_organisms, 2 * input_dim)
-        self.activation = nn.GELU()
+        self.activation = GELU1702()
 
     def forward(
         self,
@@ -1104,7 +1180,7 @@ class OutputPairEmbedding(Module):
         super().__init__()
         self.norm = RMSNorm(pair_dim)
         self.embed = nn.Embedding(num_organisms, pair_dim)
-        self.activation = nn.GELU()
+        self.activation = GELU1702()
 
     def forward(
         self,
@@ -1112,11 +1188,11 @@ class OutputPairEmbedding(Module):
         organism_index
     ):
         x = symmetrize(x)
+        x = self.norm(x)
 
         organism_embed = self.embed(organism_index)
-        embed = add('b i j d, b d', x, organism_embed)
+        x = add('b i j d, b d', x, organism_embed)
 
-        x = self.norm(x) + embed
         return self.activation(x)
 
 # some reflection to make adding prediction heads easy
@@ -1141,7 +1217,7 @@ class ContactMapHead(Module):
         super().__init__()
         self.norm = RMSNorm(input_dim)
         self.embed = nn.Embedding(num_organisms, input_dim)
-        self.gelu = nn.GELU()
+        self.gelu = GELU1702()
         self.proj = Linear(input_dim, num_tracks)
         
     def forward(
@@ -1211,7 +1287,8 @@ class SpliceJunctionHead(Module):
 
         x = embeds_1bp[batch_indices, indices]  # [B, P, H]
 
-        x = multiply('b p h, t h, t h -> b p t h', x, self.scale, self.offset)
+        x = multiply('b p h, t h -> b p t h', x, self.scale)
+        x = add('b p t h, t h -> b p t h', x, self.offset)
     
         # get rotary embeddings [T, H]
         
@@ -1251,6 +1328,140 @@ class TracksScaledPrediction(Module):
     ):
         track_pred = self.to_pred(x)
         return F.softplus(track_pred) * F.softplus(self.scale)
+
+class GenomeTracksHead(Module):
+    """JAX-style genome tracks head with per-resolution submodules."""
+    def __init__(
+        self,
+        dim_1bp,
+        dim_128bp,
+        num_tracks,
+        resolutions = (1, 128)
+    ):
+        super().__init__()
+        self.resolutions = ModuleDict()
+        if 1 in resolutions:
+            self.resolutions["resolution_1"] = TracksScaledPrediction(dim_1bp, num_tracks)
+        if 128 in resolutions:
+            self.resolutions["resolution_128"] = TracksScaledPrediction(dim_128bp, num_tracks)
+
+    def forward(
+        self,
+        embeds_1bp = None,
+        embeds_128bp = None
+    ):
+        out = {}
+        if "resolution_1" in self.resolutions:
+            assert embeds_1bp is not None
+            out["scaled_predictions_1bp"] = self.resolutions["resolution_1"](embeds_1bp)
+        if "resolution_128" in self.resolutions:
+            assert embeds_128bp is not None
+            out["scaled_predictions_128bp"] = self.resolutions["resolution_128"](embeds_128bp)
+        return out
+
+class ContactMapsHead(Module):
+    """JAX-style contact maps head (linear projection only)."""
+    def __init__(
+        self,
+        input_dim,
+        num_tracks
+    ):
+        super().__init__()
+        self.to_pred = Linear(input_dim, num_tracks)
+
+    def forward(
+        self,
+        embeds_pair,
+        organism_index = None
+    ):
+        x = symmetrize(embeds_pair)
+        return self.to_pred(x)
+
+class SpliceSitesJunctionHead(Module):
+    """JAX-style splice junction head with per-site rotary embeddings."""
+    def __init__(
+        self,
+        input_dim,
+        hidden_dim,
+        max_num_tissues,
+        rope_max_position = 2 ** 20
+    ):
+        super().__init__()
+        self.project = Linear(input_dim, hidden_dim)
+        self.hidden_dim = hidden_dim
+        self.max_num_tissues = max_num_tissues
+
+        param_size = 2 * max_num_tissues * hidden_dim
+        self.pos_donor_embeddings = nn.Parameter(torch.zeros(param_size))
+        self.pos_acceptor_embeddings = nn.Parameter(torch.zeros(param_size))
+        self.neg_donor_embeddings = nn.Parameter(torch.zeros(param_size))
+        self.neg_acceptor_embeddings = nn.Parameter(torch.zeros(param_size))
+
+        self.rope = RotaryEmbedding(hidden_dim, max_positions = rope_max_position)
+
+    def _apply_rope(
+        self,
+        embeds_1bp,
+        indices,
+        embeddings_param
+    ):
+        batch, device = embeds_1bp.shape[0], embeds_1bp.device
+        indices = indices.to(device = device).long()
+        batch_indices = arange(batch, device = device)[:, None]
+
+        x = embeds_1bp[batch_indices, indices]  # [B, P, H]
+
+        params = embeddings_param.view(2, self.max_num_tissues, self.hidden_dim)
+        scale = params[0]
+        offset = params[1]
+
+        x = x[:, :, None, :] * scale[None, None, :, :] + offset[None, None, :, :]
+
+        rotary_emb = self.rope(indices)
+        x = apply_rotary_pos_emb(rotary_emb, x)
+        return x
+
+    def forward(
+        self,
+        embeds_1bp,
+        splice_site_positions = None
+    ):
+        if splice_site_positions is None:
+            return None
+        # splice_site_positions: [B, 4, P]
+        pos_donor_idx = splice_site_positions[:, 0, :]
+        pos_accept_idx = splice_site_positions[:, 1, :]
+        neg_donor_idx = splice_site_positions[:, 2, :]
+        neg_accept_idx = splice_site_positions[:, 3, :]
+
+        x_proj = self.project(embeds_1bp)
+
+        pos_donor_logits = self._apply_rope(x_proj, pos_donor_idx, self.pos_donor_embeddings)
+        pos_accept_logits = self._apply_rope(x_proj, pos_accept_idx, self.pos_acceptor_embeddings)
+        neg_donor_logits = self._apply_rope(x_proj, neg_donor_idx, self.neg_donor_embeddings)
+        neg_accept_logits = self._apply_rope(x_proj, neg_accept_idx, self.neg_acceptor_embeddings)
+
+        pos_counts = F.softplus(einsum(pos_donor_logits, pos_accept_logits, 'b d t h, b a t h -> b d a t'))
+        neg_counts = F.softplus(einsum(neg_donor_logits, neg_accept_logits, 'b d t h, b a t h -> b d a t'))
+
+        pos_mask = (pos_donor_idx >= 0) & (pos_accept_idx >= 0)
+        neg_mask = (neg_donor_idx >= 0) & (neg_accept_idx >= 0)
+
+        pos_counts = pos_counts * pos_mask[..., None]
+        neg_counts = neg_counts * neg_mask[..., None]
+
+        pred_counts = cat((pos_counts, neg_counts), dim = -1)
+
+        splice_junction_mask = cat((
+            pos_mask[..., None].expand(*pos_mask.shape, self.max_num_tissues),
+            neg_mask[..., None].expand(*neg_mask.shape, self.max_num_tissues)
+        ), dim = -1)
+
+        return dict(
+            predictions = pred_counts,
+            splice_site_positions = splice_site_positions,
+            splice_junction_mask = splice_junction_mask
+        )
 
 class TargetScaler(Module):
     def __init__(
@@ -1304,7 +1515,7 @@ class AlphaGenome(Module):
             1408,
             1536
         ),
-        basepairs = 5,
+        basepairs = 4,  # 4 channels: A, C, G, T (official encoding)
         dna_embed_width = 15,
         num_organisms = 2,
         transformer_kwargs: dict = dict(),
@@ -1404,6 +1615,55 @@ class AlphaGenome(Module):
         for add_head_args in organism_heads:
             self.add_head(organism, *add_head_args)
 
+    def add_reference_heads(
+        self,
+        organism,
+        genome_track_heads = None,
+        num_tracks_contacts = jax_contact_maps_tracks,
+        num_splice_usage_tracks = jax_splice_usage_tracks,
+        splice_junction_hidden_dim = jax_splice_junction_hidden_dim,
+        splice_junction_max_tissues = jax_splice_junction_max_tissues
+    ):
+        """Add JAX-aligned heads (rna_seq, cage, dnase, procap, atac, chip_tf, chip_histone, contact_maps, splice_*)."""
+        genome_track_heads = default(genome_track_heads, jax_genome_track_heads)
+
+        for head_name, spec in genome_track_heads.items():
+            head = GenomeTracksHead(
+                dim_1bp = self.dim_1bp,
+                dim_128bp = self.dim_128bp,
+                num_tracks = spec["num_tracks"],
+                resolutions = spec["resolutions"]
+            )
+            self.add_head(organism, head_name, head)
+
+        self.add_head(
+            organism,
+            "contact_maps",
+            ContactMapsHead(self.dim_contacts, num_tracks_contacts)
+        )
+
+        self.add_head(
+            organism,
+            "splice_sites_classification",
+            SpliceSiteClassifier(self.dim_1bp)
+        )
+
+        self.add_head(
+            organism,
+            "splice_sites_usage",
+            SpliceSiteUsage(self.dim_1bp, num_splice_usage_tracks)
+        )
+
+        self.add_head(
+            organism,
+            "splice_sites_junction",
+            SpliceSitesJunctionHead(
+                self.dim_1bp,
+                splice_junction_hidden_dim,
+                splice_junction_max_tissues
+            )
+        )
+
     def get_embeds(
         self,
         seq, # Int['b n']
@@ -1466,6 +1726,7 @@ class AlphaGenome(Module):
             single_repr = unet_transformer_out.single_repr,
             pairwise_repr = unet_transformer_out.pairwise_repr,
         )
+        head_inputs.setdefault("splice_site_positions", None)
 
         assert is_disjoint(set(head_inputs.keys()), set(head_kwargs.keys()))
 

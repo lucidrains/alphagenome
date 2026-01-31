@@ -25,7 +25,7 @@ from alphagenome_pytorch import AlphaGenome
 
 model = AlphaGenome()
 
-dna = torch.randint(0, 5, (2, 8192))
+dna = torch.randint(0, 4, (2, 8192))
 
 # organism_index - 0 for human, 1 for mouse - can be changed with `num_organisms` on `AlphaGenome`
 
@@ -48,7 +48,7 @@ model.add_heads(
     num_splicing_contexts = 64, # 2 strands x num. CURIE conditions
 )
 
-dna = torch.randint(0, 5, (2, 8192))
+dna = torch.randint(0, 4, (2, 8192))
 
 organism_index = torch.tensor([0, 1]) # the organism that each sequence belongs to
 splice_donor_idx = torch.tensor([[10, 100, 34], [24, 546, 870]])

@@ -28,7 +28,7 @@ def test_alphagenome():
 
     model = AlphaGenome()
 
-    dna = torch.randint(0, 5, (2, 8192))
+    dna = torch.randint(0, 4, (2, 8192))
     organism_index = torch.tensor([0, 0], dtype=torch.long)
 
     embeds_1bp, embeds_128bp, embeds_pair = model(dna, organism_index)
@@ -55,7 +55,7 @@ def test_add_custom_head():
 
     model.add_head('human', 'pred_1bp_tracks', TracksScaledPrediction(1536, 10), 'embeds_1bp')
 
-    dna = torch.randint(0, 5, (2, 8192))
+    dna = torch.randint(0, 4, (2, 8192))
 
     pred = model(dna, organism_index = 1) # (2, 8192)
     assert pred['human']['pred_1bp_tracks'].shape == (2, 8192, 10)
@@ -103,7 +103,7 @@ def test_output_heads():
         num_splicing_contexts = 64, # 2 strands x num. CURIE conditions
     )
 
-    dna = torch.randint(0, 5, (2, 8192))
+    dna = torch.randint(0, 4, (2, 8192))
 
     organism_index = torch.tensor([0, 0]) # the organism that each sequence belongs to
     splice_donor_idx = torch.tensor([[10, 100, 34], [24, 546, 870]])
