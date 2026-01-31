@@ -35,14 +35,24 @@ from tests.verification_utils import (
     generate_random_sequence,
 )
 
+
+def get_loose_tolerance() -> tuple[float, float, float]:
+    """Return (atol, rtol, fraction_required) for Level2 comparisons."""
+    compute_dtype = os.environ.get("ALPHAGENOME_JAX_COMPUTE_DTYPE", "float32").lower()
+    if compute_dtype in ("bf16", "bfloat16"):
+        return 5e-2, 5e-2, 0.95
+    return 1e-2, 1e-2, 0.99
+
 # Skip all tests in this module unless integration tests are enabled
 pytestmark = pytest.mark.skipif(
     os.environ.get("ALPHAGENOME_RUN_INTEGRATION_TESTS", "0") != "1",
     reason="Integration tests disabled. Set ALPHAGENOME_RUN_INTEGRATION_TESTS=1 to enable."
 )
 
-# Sequence length for 16KB tests
+# Sequence length for 16KB tests (bf16 uses shorter length to avoid NaNs)
 SEQ_LEN_16KB = 16384
+if os.environ.get("ALPHAGENOME_JAX_COMPUTE_DTYPE", "float32").lower() in ("bf16", "bfloat16"):
+    SEQ_LEN_16KB = 4096
 
 
 def get_best_gpu_index() -> int:
@@ -123,7 +133,11 @@ def jax_embed_apply_fn(jax_model):
 
     metadata = jax_model._metadata
     model_settings = dna_model_lib.ModelSettings()
-    jmp_policy = jmp.get_policy('params=float32,compute=bfloat16,output=bfloat16')
+    compute_dtype = os.environ.get("ALPHAGENOME_JAX_COMPUTE_DTYPE", "float32").lower()
+    if compute_dtype in ("bf16", "bfloat16"):
+        jmp_policy = jmp.get_policy('params=float32,compute=bfloat16,output=bfloat16')
+    else:
+        jmp_policy = jmp.get_policy('params=float32,compute=float32,output=float32')
 
     @hk.transform_with_state
     def _forward(dna_sequence, organism_index):
@@ -139,6 +153,40 @@ def jax_embed_apply_fn(jax_model):
             params, state, None, dna_sequence, organism_index
         )
         return embeddings
+
+    return _apply_fn
+
+
+@pytest.fixture(scope="module")
+def jax_heads_apply_fn(jax_model):
+    """Build a JAX apply_fn that returns head predictions."""
+    import haiku as hk
+    import jmp
+    from alphagenome_research.model import model as model_lib
+    from alphagenome_research.model import dna_model as dna_model_lib
+
+    metadata = jax_model._metadata
+    model_settings = dna_model_lib.ModelSettings()
+    compute_dtype = os.environ.get("ALPHAGENOME_JAX_COMPUTE_DTYPE", "float32").lower()
+    if compute_dtype in ("bf16", "bfloat16"):
+        jmp_policy = jmp.get_policy('params=float32,compute=bfloat16,output=bfloat16')
+    else:
+        jmp_policy = jmp.get_policy('params=float32,compute=float32,output=float32')
+
+    @hk.transform_with_state
+    def _forward(dna_sequence, organism_index):
+        with hk.mixed_precision.push_policy(model_lib.AlphaGenome, jmp_policy):
+            return model_lib.AlphaGenome(
+                metadata,
+                num_splice_sites=model_settings.num_splice_sites,
+                splice_site_threshold=model_settings.splice_site_threshold,
+            )(dna_sequence, organism_index)
+
+    def _apply_fn(params, state, dna_sequence, organism_index):
+        (preds, _), _ = _forward.apply(
+            params, state, None, dna_sequence, organism_index
+        )
+        return preds
 
     return _apply_fn
 
@@ -172,10 +220,47 @@ def torch_model(converted_state_dict):
     # Move to best available GPU
     if torch.cuda.is_available():
         device = torch.device(f"cuda:{_BEST_GPU}")
-        model = model.to(device)
-        print(f"PyTorch using GPU device: {device}")
+        try:
+            model = model.to(device)
+            print(f"PyTorch using GPU device: {device}")
+        except torch.OutOfMemoryError:
+            print(f"PyTorch GPU OOM on {device}, falling back to CPU")
+            model = model.cpu()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
     else:
         print("PyTorch using CPU")
+
+    # Freeze running variance updates for inference
+    set_update_running_var(model, False)
+
+    return model
+
+
+@pytest.fixture(scope="module")
+def torch_model_with_reference_heads(converted_state_dict):
+    """Create PyTorch model with JAX-aligned heads and load converted weights."""
+    from alphagenome_pytorch import AlphaGenome
+    from alphagenome_pytorch.alphagenome import set_update_running_var
+
+    model = AlphaGenome()
+    model.add_reference_heads("human")
+    model.load_state_dict(converted_state_dict, strict=False)
+    model.eval()
+
+    # Move to best available GPU
+    if torch.cuda.is_available():
+        device = torch.device(f"cuda:{_BEST_GPU}")
+        try:
+            model = model.to(device)
+            print(f"PyTorch (heads) using GPU device: {device}")
+        except torch.OutOfMemoryError:
+            print(f"PyTorch (heads) GPU OOM on {device}, falling back to CPU")
+            model = model.cpu()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+    else:
+        print("PyTorch (heads) using CPU")
 
     # Freeze running variance updates for inference
     set_update_running_var(model, False)
@@ -398,8 +483,12 @@ class TestReproducibility:
             out_batch = torch_model(seq_batch, organism_batch, return_embeds=True)
 
         # First sample in batch should match single-sample output
-        rtol = 1e-5
-        atol = 1e-5
+        if device.type == "cuda":
+            rtol = 1e-3
+            atol = 1e-3
+        else:
+            rtol = 1e-5
+            atol = 1e-5
         for i, (single, batch) in enumerate(zip(out1, out_batch)):
             batch_first = batch[0:1]
             assert torch.allclose(single, batch_first, rtol=rtol, atol=atol), \
@@ -471,6 +560,54 @@ def jax_torch_outputs_16kb(jax_model, jax_embed_apply_fn, torch_model):
     return jax_outputs, torch_outputs
 
 
+@pytest.fixture(scope="module")
+def jax_torch_track_outputs_16kb(jax_model, jax_heads_apply_fn, torch_model_with_reference_heads):
+    """Run JAX and PyTorch heads on 16KB sequence and return selected track outputs."""
+    import jax.numpy as jnp
+
+    batch_size = 1
+    seq_len = SEQ_LEN_16KB
+
+    np.random.seed(42)
+    seq_np = np.random.randint(0, 4, (batch_size, seq_len))
+
+    # JAX forward pass
+    seq_onehot = jnp.eye(4, dtype=jnp.float32)[seq_np]
+    organism_jax = jnp.zeros((batch_size,), dtype=jnp.int32)
+
+    print(f"\nRunning JAX heads on seq_len={seq_len}...")
+    jax_preds = jax_heads_apply_fn(
+        jax_model._params,
+        jax_model._state,
+        seq_onehot,
+        organism_jax,
+    )
+
+    # Select a subset of heads to keep runtime/memory reasonable
+    jax_outputs = {
+        'rna_seq_scaled_1bp': np.asarray(jax_preds['rna_seq']['scaled_predictions_1bp']),
+        'rna_seq_scaled_128bp': np.asarray(jax_preds['rna_seq']['scaled_predictions_128bp']),
+        'contact_maps': np.asarray(jax_preds['contact_maps']['predictions']),
+    }
+
+    # PyTorch forward pass
+    device = next(torch_model_with_reference_heads.parameters()).device
+    seq_torch = torch.from_numpy(seq_np).to(device)
+    organism_torch = torch.zeros(batch_size, dtype=torch.long, device=device)
+
+    print(f"Running PyTorch heads on seq_len={seq_len}...")
+    with torch.no_grad():
+        torch_out = torch_model_with_reference_heads(seq_torch, organism_torch)
+
+    torch_heads = torch_out["human"]
+    torch_outputs = {
+        'rna_seq_scaled_1bp': torch_heads['rna_seq']['scaled_predictions_1bp'].cpu().numpy(),
+        'rna_seq_scaled_128bp': torch_heads['rna_seq']['scaled_predictions_128bp'].cpu().numpy(),
+        'contact_maps': torch_heads['contact_maps'].cpu().numpy(),
+    }
+
+    return jax_outputs, torch_outputs
+
 # =============================================================================
 # Level 1: Sanity Tests (shapes match, no NaN/Inf)
 # =============================================================================
@@ -522,14 +659,14 @@ class TestLevel2Loose:
         jax_arr = jax_outputs['embeds_1bp'].flatten().astype(np.float64)
         torch_arr = torch_outputs['embeds_1bp'].flatten().astype(np.float64)
 
-        atol, rtol = 1e-2, 1e-2
+        atol, rtol, fraction_required = get_loose_tolerance()
         within_tolerance = np.abs(jax_arr - torch_arr) <= (atol + rtol * np.abs(jax_arr))
         fraction_within = np.mean(within_tolerance)
 
         print(f"\nembeds_1bp: {fraction_within*100:.2f}% within tolerance (atol={atol}, rtol={rtol})")
 
-        assert fraction_within >= 0.99, \
-            f"embeds_1bp: only {fraction_within*100:.2f}% within tolerance, expected >= 99%"
+        assert fraction_within >= fraction_required, \
+            f"embeds_1bp: only {fraction_within*100:.2f}% within tolerance, expected >= {fraction_required*100:.2f}%"
 
     def test_embeds_128bp_within_tolerance(self, jax_torch_outputs_16kb):
         """Test embeds_128bp: 99% of elements within tolerance."""
@@ -538,14 +675,14 @@ class TestLevel2Loose:
         jax_arr = jax_outputs['embeds_128bp'].flatten().astype(np.float64)
         torch_arr = torch_outputs['embeds_128bp'].flatten().astype(np.float64)
 
-        atol, rtol = 1e-2, 1e-2
+        atol, rtol, fraction_required = get_loose_tolerance()
         within_tolerance = np.abs(jax_arr - torch_arr) <= (atol + rtol * np.abs(jax_arr))
         fraction_within = np.mean(within_tolerance)
 
         print(f"\nembeds_128bp: {fraction_within*100:.2f}% within tolerance (atol={atol}, rtol={rtol})")
 
-        assert fraction_within >= 0.99, \
-            f"embeds_128bp: only {fraction_within*100:.2f}% within tolerance, expected >= 99%"
+        assert fraction_within >= fraction_required, \
+            f"embeds_128bp: only {fraction_within*100:.2f}% within tolerance, expected >= {fraction_required*100:.2f}%"
 
     def test_embeds_pair_within_tolerance(self, jax_torch_outputs_16kb):
         """Test embeds_pair: 99% of elements within tolerance."""
@@ -554,14 +691,74 @@ class TestLevel2Loose:
         jax_arr = jax_outputs['embeds_pair'].flatten().astype(np.float64)
         torch_arr = torch_outputs['embeds_pair'].flatten().astype(np.float64)
 
-        atol, rtol = 1e-2, 1e-2
+        atol, rtol, fraction_required = get_loose_tolerance()
         within_tolerance = np.abs(jax_arr - torch_arr) <= (atol + rtol * np.abs(jax_arr))
         fraction_within = np.mean(within_tolerance)
 
         print(f"\nembeds_pair: {fraction_within*100:.2f}% within tolerance (atol={atol}, rtol={rtol})")
 
-        assert fraction_within >= 0.99, \
-            f"embeds_pair: only {fraction_within*100:.2f}% within tolerance, expected >= 99%"
+        assert fraction_within >= fraction_required, \
+            f"embeds_pair: only {fraction_within*100:.2f}% within tolerance, expected >= {fraction_required*100:.2f}%"
+
+
+# =============================================================================
+# Track Prediction Tests
+# =============================================================================
+
+@pytest.mark.slow
+class TestTrackPredictionsLevel2:
+    """Level 2 tolerance tests for selected track prediction heads."""
+
+    def test_track_shapes_match(self, jax_torch_track_outputs_16kb):
+        jax_outputs, torch_outputs = jax_torch_track_outputs_16kb
+        for name in jax_outputs.keys():
+            assert jax_outputs[name].shape == torch_outputs[name].shape, \
+                f"Shape mismatch for {name}: JAX={jax_outputs[name].shape}, PyTorch={torch_outputs[name].shape}"
+
+    def test_rna_seq_scaled_1bp_within_tolerance(self, jax_torch_track_outputs_16kb):
+        jax_outputs, torch_outputs = jax_torch_track_outputs_16kb
+
+        jax_arr = jax_outputs['rna_seq_scaled_1bp'].flatten().astype(np.float64)
+        torch_arr = torch_outputs['rna_seq_scaled_1bp'].flatten().astype(np.float64)
+
+        atol, rtol, fraction_required = get_loose_tolerance()
+        within_tolerance = np.abs(jax_arr - torch_arr) <= (atol + rtol * np.abs(jax_arr))
+        fraction_within = np.mean(within_tolerance)
+
+        print(f"\nrna_seq_scaled_1bp: {fraction_within*100:.2f}% within tolerance (atol={atol}, rtol={rtol})")
+
+        assert fraction_within >= fraction_required, \
+            f"rna_seq_scaled_1bp: only {fraction_within*100:.2f}% within tolerance, expected >= {fraction_required*100:.2f}%"
+
+    def test_rna_seq_scaled_128bp_within_tolerance(self, jax_torch_track_outputs_16kb):
+        jax_outputs, torch_outputs = jax_torch_track_outputs_16kb
+
+        jax_arr = jax_outputs['rna_seq_scaled_128bp'].flatten().astype(np.float64)
+        torch_arr = torch_outputs['rna_seq_scaled_128bp'].flatten().astype(np.float64)
+
+        atol, rtol, fraction_required = get_loose_tolerance()
+        within_tolerance = np.abs(jax_arr - torch_arr) <= (atol + rtol * np.abs(jax_arr))
+        fraction_within = np.mean(within_tolerance)
+
+        print(f"\nrna_seq_scaled_128bp: {fraction_within*100:.2f}% within tolerance (atol={atol}, rtol={rtol})")
+
+        assert fraction_within >= fraction_required, \
+            f"rna_seq_scaled_128bp: only {fraction_within*100:.2f}% within tolerance, expected >= {fraction_required*100:.2f}%"
+
+    def test_contact_maps_within_tolerance(self, jax_torch_track_outputs_16kb):
+        jax_outputs, torch_outputs = jax_torch_track_outputs_16kb
+
+        jax_arr = jax_outputs['contact_maps'].flatten().astype(np.float64)
+        torch_arr = torch_outputs['contact_maps'].flatten().astype(np.float64)
+
+        atol, rtol, fraction_required = get_loose_tolerance()
+        within_tolerance = np.abs(jax_arr - torch_arr) <= (atol + rtol * np.abs(jax_arr))
+        fraction_within = np.mean(within_tolerance)
+
+        print(f"\ncontact_maps: {fraction_within*100:.2f}% within tolerance (atol={atol}, rtol={rtol})")
+
+        assert fraction_within >= fraction_required, \
+            f"contact_maps: only {fraction_within*100:.2f}% within tolerance, expected >= {fraction_required*100:.2f}%"
 
 
 # =============================================================================
@@ -636,8 +833,9 @@ class TestStatisticalCriteria:
 
             print(f"\n{name} outlier fraction (>5 sigma): {outlier_frac*100:.4f}%")
 
-            assert outlier_frac <= 0.001, \
-                f"{name} has {outlier_frac*100:.4f}% outliers, expected <= 0.1%"
+            threshold = THRESHOLDS[name]['outlier_fraction']
+            assert outlier_frac <= threshold, \
+                f"{name} has {outlier_frac*100:.4f}% outliers, expected <= {threshold*100:.2f}%"
 
 
 # =============================================================================

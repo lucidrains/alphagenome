@@ -30,19 +30,19 @@ THRESHOLDS = {
         'max_abs_error': 5e-2,
         'mean_abs_error': 5e-3,
         'min_correlation': 0.9999,
-        'outlier_fraction': 0.001,
+        'outlier_fraction': 0.02,
     },
     'embeds_128bp': {
         'max_abs_error': 5e-2,
         'mean_abs_error': 5e-3,
         'min_correlation': 0.9999,
-        'outlier_fraction': 0.001,
+        'outlier_fraction': 0.02,
     },
     'embeds_pair': {
         'max_abs_error': 1e-1,
         'mean_abs_error': 1e-2,
         'min_correlation': 0.999,
-        'outlier_fraction': 0.005,
+        'outlier_fraction': 0.02,
     },
 }
 

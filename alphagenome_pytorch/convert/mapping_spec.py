@@ -762,7 +762,7 @@ def build_trunk_mapping() -> list[ParamMapping]:
         for res in resolutions:
             jax_prefix = f"alphagenome/head/{head_name}/resolution_{res}"
             for organism, idx in organism_indices.items():
-                torch_prefix = f"heads.{organism}.{head_name}.resolution_{res}"
+                torch_prefix = f"heads.{organism}.{head_name}.resolutions.resolution_{res}"
                 mappings.extend([
                     ParamMapping(
                         jax_keys=[f"{jax_prefix}/multi_organism_linear/w"],
