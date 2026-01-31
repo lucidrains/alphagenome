@@ -503,11 +503,13 @@ class UpresBlock(Module):
 # position related
 
 def relative_shift(t):
-    *leading_dims, seq_len, dim = t.shape
-    t = F.pad(t, (1, 0), value = 0.)
-    t = t.reshape(*leading_dims, dim + 1, seq_len)
-    t = t[..., 1:, :].reshape(*leading_dims, seq_len, dim)
-    return t[..., :, :seq_len]
+    # Match JAX _shift in reference attention.py
+    # Input: (..., query_len, query_len + key_len) with query_len == key_len in this model
+    *leading_dims, n_rows, n_diags = t.shape
+    t = t.reshape(*leading_dims, n_diags, n_rows)
+    t = t[..., 1:, :]
+    t = t.reshape(*leading_dims, n_rows, n_diags - 1)
+    return t[..., :n_rows]
 
 # rotary, but with attenuation of short relative distance frequencies
 
