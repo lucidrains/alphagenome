@@ -1,6 +1,6 @@
 <img src="./extended-figure-1.png" width="450px"></img>
 
-## AlphaGenome (wip)
+## AlphaGenome
 
 Implementation of [AlphaGenome](https://deepmind.google/discover/blog/alphagenome-ai-for-better-understanding-the-genome/), Deepmind's updated genomic attention model
 
