@@ -4,7 +4,7 @@ class AlphaGenomeConfig:
     def __init__(
         self,
         dims=(768, 896, 1024, 1152, 1280, 1408, 1536),
-        basepairs=5,
+        basepairs=4,
         dna_embed_width=15,
         num_organisms=2,
         transformer_kwargs=None,
@@ -19,7 +19,7 @@ class AlphaGenomeConfig:
         self.num_organisms = num_organisms
 
         self.transformer_kwargs = transformer_kwargs or {
-            "depth": 8,
+            "depth": 9,
             "heads": 8,
             "dim_head_qk": 128,
             "dim_head_v": 192,

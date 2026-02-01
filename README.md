@@ -13,8 +13,26 @@ The [official code](https://github.com/google-deepmind/alphagenome_research) has
 ## Install
 
 ```bash
-$ pip install alphagenome-pytorch
+pip install alphagenome-pytorch
 ```
+
+Or with [uv](https://docs.astral.sh/uv/) (recommended):
+
+```bash
+uv pip install alphagenome-pytorch
+```
+
+### Environment Setup
+
+To use pretrained weights from HuggingFace, create a `.env` file with your credentials:
+
+```bash
+cp .env.template .env
+# Edit .env and add your HF_TOKEN
+```
+
+Required environment variables:
+- `HF_TOKEN`: Your HuggingFace API token ([get one here](https://huggingface.co/settings/tokens))
 
 ## Usage
 
@@ -26,7 +44,7 @@ from alphagenome_pytorch import AlphaGenome
 
 model = AlphaGenome()
 
-dna = torch.randint(0, 5, (2, 8192))
+dna = torch.randint(0, 4, (2, 8192))
 
 # organism_index - 0 for human, 1 for mouse - can be changed with `num_organisms` on `AlphaGenome`
 
@@ -49,7 +67,7 @@ model.add_heads(
     num_splicing_contexts = 64, # 2 strands x num. CURIE conditions
 )
 
-dna = torch.randint(0, 5, (2, 8192))
+dna = torch.randint(0, 4, (2, 8192))
 
 organism_index = torch.tensor([0, 1]) # the organism that each sequence belongs to
 splice_donor_idx = torch.tensor([[10, 100, 34], [24, 546, 870]])
@@ -96,23 +114,69 @@ model.total_parameters # 259,459,534 (vs ~450 million trainable parameters)
 python train_dummy.py --config_file=configs/dummy.yaml
 ```
 
+## Loading Pretrained Weights
+
+Load the official JAX weights converted to PyTorch:
+
+```python
+from alphagenome_pytorch import AlphaGenome
+from alphagenome_pytorch.convert.convert_checkpoint import (
+    convert_checkpoint,
+    flatten_nested_dict,
+)
+from alphagenome_research.model.dna_model import create_from_huggingface
+
+# Load and convert JAX weights
+jax_model = create_from_huggingface("all_folds")
+state_dict = convert_checkpoint(
+    flatten_nested_dict(jax_model._params),
+    flatten_nested_dict(jax_model._state),
+)
+
+# Create PyTorch model with pretrained weights
+model = AlphaGenome()
+model.add_reference_heads("human")  # Add official prediction heads
+model.load_state_dict(state_dict, strict=False)
+model.eval()
+```
+
 ## Contributing
 
-First install locally with the following
+### Development Setup
 
 ```bash
-$ pip install '.[test]' # or uv pip install . '[test]'
+# Clone and install with dev dependencies using uv
+git clone https://github.com/lucidrains/alphagenome.git
+cd alphagenome
+uv pip install -e '.[test,convert]'
+
+# Set up environment variables
+cp .env.template .env
+# Edit .env and add your HF_TOKEN
 ```
 
-Then make your changes, add a test to `tests/test_alphagenome.py`
+### Running Tests
 
 ```bash
-$ pytest tests
+# Run unit tests
+uv run pytest tests/test_alphagenome.py -v
+
+# Run regression tests (requires HF access)
+ALPHAGENOME_RUN_INTEGRATION_TESTS=1 uv run pytest tests/test_regression.py -v
+
+# Run full integration tests
+ALPHAGENOME_RUN_INTEGRATION_TESTS=1 uv run pytest tests/test_integration_jax_torch.py -v
 ```
 
-That's it
+### Regenerating Regression Data
 
-Vibe coding with some attention network is totally welcomed, if it works
+If you modify the model architecture, regenerate the reference tensors:
+
+```bash
+uv run python tests/generate_regression_tensors.py
+```
+
+That's it. Vibe coding with some attention network is totally welcomed, if it works
 
 ## Citations
 
