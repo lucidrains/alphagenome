@@ -62,7 +62,10 @@ def load_jax_checkpoint(model_version: str = "all_folds", use_gpu: bool = True):
         import jax
         from alphagenome_research.model.dna_model import create, create_from_huggingface
     except ImportError as e:
-        print(f"Error: Missing required dependencies. Install with: pip install -e '.[convert]'")
+        print(f"Error: Missing required dependency 'alphagenome-research'.")
+        print(f"Install it manually from GitHub (uv recommended):")
+        print(f"    uv pip install git+https://github.com/google-deepmind/alphagenome_research.git")
+        print(f"\nOther conversion dependencies can be installed with: uv pip install -e '.[convert]'")
         print(f"Details: {e}")
         sys.exit(1)
 

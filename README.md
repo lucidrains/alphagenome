@@ -10,6 +10,8 @@ The [official code](https://github.com/google-deepmind/alphagenome_research) has
 
 - [Miquel Anglada-Girotto](https://github.com/MiqG) for contributing the organism, output embedding, loss functions, and all the splicing prediction heads!
 
+- [Xinming Tu](https://github.com/XinmingTu) for aligning the architecture with the official JAX implementation, enabling pretrained weight compatibility, and contributing the regression test suite!
+
 ## Install
 
 ```bash
@@ -116,7 +118,15 @@ python train_dummy.py --config_file=configs/dummy.yaml
 
 ## Loading Pretrained Weights
 
-Load the official JAX weights converted to PyTorch:
+### Installation requirements
+
+To use the conversion utilities, you will need to install the `alphagenome-research` package manually from GitHub
+
+```bash
+uv pip install git+https://github.com/google-deepmind/alphagenome_research.git
+```
+
+### Loading and Converting
 
 ```python
 from alphagenome_pytorch import AlphaGenome
