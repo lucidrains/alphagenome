@@ -176,6 +176,7 @@ def regression_data() -> dict[str, Any]:
 @pytest.fixture(scope="module")
 def torch_model():
     """Load PyTorch model with pretrained weights and reference heads."""
+    import jax
     from alphagenome_pytorch import AlphaGenome
     from alphagenome_pytorch.alphagenome import set_update_running_var
     from alphagenome_pytorch.convert.convert_checkpoint import (
@@ -185,7 +186,19 @@ def torch_model():
     from alphagenome_research.model.dna_model import create_from_huggingface
 
     print("\nLoading JAX model and converting weights...")
-    jax_model = create_from_huggingface("all_folds")
+    
+    # Try to get GPU, fallback to CPU
+    try:
+        device = jax.devices("gpu")[0]
+    except (RuntimeError, ValueError):
+        try:
+            device = jax.devices("tpu")[0]
+        except (RuntimeError, ValueError):
+            device = jax.devices("cpu")[0]
+    
+    print(f"JAX using device: {device}")
+    
+    jax_model = create_from_huggingface("all_folds", device=device)
     flat_params = flatten_nested_dict(jax_model._params)
     flat_state = flatten_nested_dict(jax_model._state)
     state_dict = convert_checkpoint(flat_params, flat_state, verbose=False)
