@@ -168,6 +168,7 @@ class PolyadenylationVariantScorer:
         interval: Interval,
         variant: Variant,
         *,
+        settings=None,
         track_metadata: pd.DataFrame | dict[str, Any] | None = None,
     ) -> tuple[PolyadenylationVariantMasks, pd.DataFrame]:
         """Get masks and metadata for variant scoring.
@@ -183,7 +184,7 @@ class PolyadenylationVariantScorer:
         Raises:
             ValueError: If too many genes are found for the interval.
         """
-        del track_metadata
+        del track_metadata, settings
 
         if self._gene_mask_extractor is not None:
             _, gene_metadata = self._gene_mask_extractor.extract(interval, variant)
@@ -274,7 +275,7 @@ class PolyadenylationVariantScorer:
         alt: Mapping[str, torch.Tensor],
         *,
         masks: PolyadenylationVariantMasks,
-        requested_output: str,
+        settings,
         variant: Variant | None = None,
         interval: Interval | None = None,
     ) -> dict[str, np.ndarray]:
@@ -291,8 +292,11 @@ class PolyadenylationVariantScorer:
         Returns:
             Dictionary with 'scores' and 'gene_mask'.
         """
-        ref_tensor = ref[requested_output]
-        alt_tensor = alt[requested_output]
+        requested_output = getattr(settings, 'requested_output', settings)
+        output_key = _resolve_output_key(ref, requested_output)
+
+        ref_tensor = ref[output_key]
+        alt_tensor = alt[output_key]
 
         # Align alternate if variant causes indel
         if variant is not None and interval is not None:
@@ -316,7 +320,7 @@ class PolyadenylationVariantScorer:
         *,
         track_metadata: pd.DataFrame,
         mask_metadata: pd.DataFrame,
-        requested_output: str | None = None,
+        settings=None,
     ) -> anndata.AnnData:
         """Finalize variant scoring by filtering with gene mask.
 
@@ -329,10 +333,39 @@ class PolyadenylationVariantScorer:
         Returns:
             AnnData object with variant scores.
         """
-        del requested_output
+        requested_output = getattr(settings, 'requested_output', settings)
+        if isinstance(track_metadata, dict) and requested_output is not None:
+            meta_key = _resolve_output_key(track_metadata, requested_output)
+            if meta_key is not None:
+                track_metadata = track_metadata[meta_key]
 
         return create_anndata(
             scores['scores'][scores['gene_mask']],
             obs=mask_metadata,
             var=track_metadata,
         )
+
+
+def _resolve_output_key(outputs: Mapping, requested_output):
+    if requested_output in outputs:
+        return requested_output
+    if hasattr(requested_output, 'name'):
+        name = requested_output.name
+        if name in outputs:
+            return name
+        if name.lower() in outputs:
+            return name.lower()
+        for key in outputs:
+            if hasattr(key, 'name') and key.name == name:
+                return key
+    if isinstance(requested_output, str):
+        if requested_output in outputs:
+            return requested_output
+        if requested_output.lower() in outputs:
+            return requested_output.lower()
+        if requested_output.upper() in outputs:
+            return requested_output.upper()
+        for key in outputs:
+            if hasattr(key, 'name') and key.name == requested_output.upper():
+                return key
+    raise KeyError(f'Requested output {requested_output!r} not found in predictions.')

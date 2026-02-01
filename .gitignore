@@ -199,5 +199,9 @@ reference/
 # Project-specific
 CONVERSION_PLAN.md
 explore/
+!explore/colab/
+explore/colab/*
+!explore/colab/*_pytorch.ipynb
 .claude/
 debug/
+CLAUDE.md

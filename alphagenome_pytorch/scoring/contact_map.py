@@ -33,6 +33,7 @@ from alphagenome_pytorch.scoring.variant_scoring import (
     Interval,
     Variant,
     create_anndata,
+    get_resolution,
 )
 
 # Default resolution for contact maps
@@ -66,7 +67,8 @@ def create_center_mask(
         target_resolution_width = math.ceil(width / resolution)
 
         # Determine the position of the variant in the specified resolution.
-        base_resolution_center = variant.position - interval.start
+        variant_start = getattr(variant, 'start', variant.position)
+        base_resolution_center = variant_start - interval.start
         target_resolution_center = base_resolution_center // resolution
 
         # Compute start and end indices of the variant-centered mask.
@@ -123,6 +125,7 @@ class ContactMapScorer:
         interval: Interval,
         variant: Variant,
         *,
+        settings,
         track_metadata: pd.DataFrame | dict[str, Any] | None = None,
     ) -> tuple[np.ndarray, None]:
         """Get masks and metadata for variant scoring.
@@ -140,7 +143,11 @@ class ContactMapScorer:
         """
         del track_metadata  # Unused.
 
-        resolution = self._resolution
+        requested_output = getattr(settings, 'requested_output', settings)
+        try:
+            resolution = get_resolution(requested_output)
+        except Exception:
+            resolution = self._resolution
         mask = create_center_mask(
             interval, variant, width=resolution, resolution=resolution
         )
@@ -168,7 +175,7 @@ class ContactMapScorer:
         alt: Mapping[str, torch.Tensor],
         *,
         masks: np.ndarray,
-        requested_output: str,
+        settings,
         variant: Variant | None = None,
         interval: Interval | None = None,
     ) -> dict[str, np.ndarray]:
@@ -189,8 +196,11 @@ class ContactMapScorer:
         """
         del variant, interval  # Unused.
 
-        ref_tensor = ref[requested_output]
-        alt_tensor = alt[requested_output]
+        requested_output = getattr(settings, 'requested_output', settings)
+        output_key = _resolve_output_key(ref, requested_output)
+
+        ref_tensor = ref[output_key]
+        alt_tensor = alt[output_key]
 
         # Mean absolute difference, reduced over contact map rows.
         # Ref, alt shape: [H, W, C]
@@ -213,7 +223,7 @@ class ContactMapScorer:
         *,
         track_metadata: pd.DataFrame,
         mask_metadata: None = None,
-        requested_output: str | None = None,
+        settings=None,
     ) -> anndata.AnnData:
         """Finalize variant scoring by creating AnnData object.
 
@@ -226,7 +236,13 @@ class ContactMapScorer:
         Returns:
             AnnData object with variant scores.
         """
-        del mask_metadata, requested_output  # Unused.
+        del mask_metadata  # Unused.
+
+        requested_output = getattr(settings, 'requested_output', settings)
+        if isinstance(track_metadata, dict) and requested_output is not None:
+            meta_key = _resolve_output_key(track_metadata, requested_output)
+            if meta_key is not None:
+                track_metadata = track_metadata[meta_key]
 
         num_tracks = len(track_metadata)
         return create_anndata(
@@ -234,3 +250,28 @@ class ContactMapScorer:
             obs=None,
             var=track_metadata,
         )
+
+
+def _resolve_output_key(outputs: Mapping, requested_output):
+    if requested_output in outputs:
+        return requested_output
+    if hasattr(requested_output, 'name'):
+        name = requested_output.name
+        if name in outputs:
+            return name
+        if name.lower() in outputs:
+            return name.lower()
+        for key in outputs:
+            if hasattr(key, 'name') and key.name == name:
+                return key
+    if isinstance(requested_output, str):
+        if requested_output in outputs:
+            return requested_output
+        if requested_output.lower() in outputs:
+            return requested_output.lower()
+        if requested_output.upper() in outputs:
+            return requested_output.upper()
+        for key in outputs:
+            if hasattr(key, 'name') and key.name == requested_output.upper():
+                return key
+    raise KeyError(f'Requested output {requested_output!r} not found in predictions.')

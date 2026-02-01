@@ -14,9 +14,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import TYPE_CHECKING, Any, Generic, TypeVar, Union
 
-import anndata
 import numpy as np
-import pandas as pd
 import torch
 from torch import Tensor
 
@@ -49,8 +47,12 @@ class OutputType(Enum):
     PROCAP = auto()
 
 
+if TYPE_CHECKING:
+    import anndata
+    import pandas as pd
+
 # Type alias for output metadata (mapping from OutputType to track metadata)
-OutputMetadata = Mapping[OutputType, pd.DataFrame]
+OutputMetadata = Mapping[OutputType, 'pd.DataFrame']
 
 
 @dataclass
@@ -171,9 +173,9 @@ class Variant:
 def create_anndata(
     scores: np.ndarray,
     *,
-    obs: pd.DataFrame | None,
-    var: pd.DataFrame,
-) -> anndata.AnnData:
+    obs: 'pd.DataFrame | None',
+    var: 'pd.DataFrame',
+) -> 'anndata.AnnData':
     """Helper function for creating AnnData objects.
 
     Args:
@@ -184,6 +186,15 @@ def create_anndata(
     Returns:
         AnnData object with the scores and metadata.
     """
+    try:
+        import anndata
+        import pandas as pd
+    except ImportError as exc:
+        raise ImportError(
+            'anndata and pandas are required to create AnnData outputs. '
+            "Install them with: pip install 'alphagenome-pytorch[scoring]'"
+        ) from exc
+
     var = var.copy()
     # Explicitly cast dataframe indices to str to avoid
     # ImplicitModificationWarning being logged over and over again.

@@ -236,6 +236,7 @@ class SpliceJunctionVariantScorer:
         interval: Interval,
         variant: Variant,
         *,
+        settings=None,
         track_metadata: pd.DataFrame | None = None,
     ) -> tuple[None, pd.DataFrame]:
         """Get masks and metadata for variant scoring.
@@ -248,7 +249,7 @@ class SpliceJunctionVariantScorer:
         Returns:
             Tuple of (None, metadata DataFrame).
         """
-        del track_metadata
+        del track_metadata, settings
         if self._gene_mask_extractor is not None:
             _, metadata = self._gene_mask_extractor.extract(interval, variant)
         else:
@@ -293,7 +294,7 @@ class SpliceJunctionVariantScorer:
         alt: Mapping[str, dict[str, torch.Tensor]],
         *,
         masks: None,
-        requested_output: str,
+        settings,
         variant: Variant | None = None,
         interval: Interval | None = None,
     ) -> dict[str, np.ndarray]:
@@ -312,9 +313,12 @@ class SpliceJunctionVariantScorer:
         """
         del variant, interval, masks
 
-        ref_junctions = ref[requested_output]['predictions']
-        alt_junctions = alt[requested_output]['predictions']
-        splice_site_positions = ref[requested_output]['splice_site_positions']
+        requested_output = getattr(settings, 'requested_output', settings)
+        output_key = _resolve_output_key(ref, requested_output)
+
+        ref_junctions = ref[output_key]['predictions']
+        alt_junctions = alt[output_key]['predictions']
+        splice_site_positions = ref[output_key]['splice_site_positions']
 
         # Ignore splice sites beyond the max_splice_sites specified.
         ref_junctions = ref_junctions[:_MAX_SPLICE_SITES, :_MAX_SPLICE_SITES]
@@ -343,7 +347,7 @@ class SpliceJunctionVariantScorer:
         *,
         track_metadata: pd.DataFrame,
         mask_metadata: pd.DataFrame,
-        requested_output: str | None = None,
+        settings=None,
     ) -> anndata.AnnData:
         """Finalize variant scoring by joining with gene metadata.
 
@@ -356,7 +360,12 @@ class SpliceJunctionVariantScorer:
         Returns:
             AnnData object with variant scores.
         """
-        del requested_output
+        requested_output = getattr(settings, 'requested_output', settings)
+
+        if isinstance(track_metadata, dict) and requested_output is not None:
+            meta_key = _resolve_output_key(track_metadata, requested_output)
+            if meta_key is not None:
+                track_metadata = track_metadata[meta_key]
 
         if mask_metadata.empty:
             return _create_empty(mask_metadata, track_metadata)
@@ -389,3 +398,28 @@ class SpliceJunctionVariantScorer:
             return _create(junction_scores, mask_metadata, track_metadata)
         else:
             return _create_empty(mask_metadata, track_metadata)
+
+
+def _resolve_output_key(outputs: Mapping, requested_output):
+    if requested_output in outputs:
+        return requested_output
+    if hasattr(requested_output, 'name'):
+        name = requested_output.name
+        if name in outputs:
+            return name
+        if name.lower() in outputs:
+            return name.lower()
+        for key in outputs:
+            if hasattr(key, 'name') and key.name == name:
+                return key
+    if isinstance(requested_output, str):
+        if requested_output in outputs:
+            return requested_output
+        if requested_output.lower() in outputs:
+            return requested_output.lower()
+        if requested_output.upper() in outputs:
+            return requested_output.upper()
+        for key in outputs:
+            if hasattr(key, 'name') and key.name == requested_output.upper():
+                return key
+    raise KeyError(f'Requested output {requested_output!r} not found in predictions.')

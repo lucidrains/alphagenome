@@ -32,6 +32,7 @@ dependencies = [
     "PoPE-pytorch>=0.0.9",
     "torch-einops-utils",
     "torch>=2.4",
+    "scikit-learn>=1.8.0",
 ]
 
 [project.urls]
@@ -70,6 +71,7 @@ scoring = [
 data = [
     "tensorflow>=2.15",
     "pandas>=2.0",
+    "etils[epath]>=1.7.0",
 ]
 
 # All optional dependencies

@@ -167,6 +167,14 @@ def get_resolution(output_type: OutputType) -> int:
     Raises:
         ValueError: If the output type is unknown.
     """
+    if not isinstance(output_type, OutputType):
+        output_name = getattr(output_type, 'name', None)
+        if output_name is not None:
+            try:
+                output_type = OutputType[output_name]
+            except KeyError:
+                pass
+
     match output_type:
         case (
             OutputType.ATAC
@@ -222,7 +230,8 @@ def create_center_mask(
         target_resolution_width = math.ceil(width / resolution)
 
         # Determine the position of the variant in the specified resolution
-        base_resolution_center = variant.position - interval.start
+        variant_start = getattr(variant, 'start', variant.position)
+        base_resolution_center = variant_start - interval.start
         target_resolution_center = base_resolution_center // resolution
 
         # Compute start and end indices of the variant-centered mask

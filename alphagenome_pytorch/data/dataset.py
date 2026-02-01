@@ -25,7 +25,7 @@ except ImportError:
 from alphagenome_pytorch.data.bundles import BundleName
 
 
-_DEFAULT_PATH = 'gs:///alphagenome-datasets/v1/train/'
+_DEFAULT_PATH = 'gs://alphagenome-datasets/v1/train/'
 
 _DNA_SEQUENCE_DTYPE = 'float32'
 _DNA_SEQUENCE_FEATURE_SPEC = {
