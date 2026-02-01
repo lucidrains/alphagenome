@@ -20,23 +20,13 @@ from einops import rearrange, repeat, reduce, einsum
 from torch_einops_utils import pack_with_inverse
 from PoPE_pytorch import PoPE, compute_attn_similarity
 
-# Match JAX full-float matmul behavior (avoid TF32 on Ampere+ GPUs).
+# Enable TF32 by default for faster matmuls; set ALPHAGENOME_ALLOW_TF32=0 to disable.
+_ALLOW_TF32 = os.environ.get("ALPHAGENOME_ALLOW_TF32", "1") == "1"
 if torch.cuda.is_available():
-    torch.backends.cuda.matmul.allow_tf32 = False
-    torch.backends.cudnn.allow_tf32 = False
-
-# Emulate JAX mixed-precision outputs by rounding activations to bf16.
-# Disabled by default; enable with ALPHAGENOME_EMULATE_BF16=1.
-_EMULATE_BF16 = os.environ.get("ALPHAGENOME_EMULATE_BF16", "0") == "1"
+    torch.backends.cuda.matmul.allow_tf32 = _ALLOW_TF32
+    torch.backends.cudnn.allow_tf32 = _ALLOW_TF32
 # Allow native bf16 compute paths in attention (disabled by default).
 _ALLOW_NATIVE_BF16 = os.environ.get("ALPHAGENOME_TORCH_BF16", "0") == "1"
-
-def maybe_bf16(t):
-    if not _EMULATE_BF16 or not torch.cuda.is_available():
-        return t
-    if not is_tensor(t) or not t.is_cuda or not t.is_floating_point():
-        return t
-    return t.to(torch.bfloat16).to(torch.float32)
 
 # ein notation
 
@@ -346,7 +336,7 @@ class BatchRMSNorm(Module):
 
                 batch_var = get_maybe_dist_var(to_reduce, distributed = self.distributed)
 
-                running_var.lerp_(batch_var, self.momentum)
+                running_var.lerp_(batch_var.to(running_var.dtype), self.momentum)
 
         # get denominator
 
@@ -484,9 +474,7 @@ class DownresBlock(Module):
 
         out = self.conv_out(out) + out
 
-        out = maybe_bf16(out)
         pooled = self.max_pool(out)
-        pooled = maybe_bf16(pooled)
         if return_pre_pool:
             return pooled, out
         return pooled
@@ -527,7 +515,7 @@ class UpresBlock(Module):
             assert exists(skip)
             out = out + self.unet_conv(skip)
 
-        return maybe_bf16(self.conv_out(out) + out)
+        return self.conv_out(out) + out
 
 # position related
 
@@ -838,47 +826,33 @@ class SingleToPairwise(Module):
 
         single = self.avg_pool(single)
         single = self.norm(single)
-        single = maybe_bf16(single)
-
         pool_seq_len = single.shape[1]
 
         q, k = self.to_qk(single).chunk(2, dim = -1)
         q, k = tuple(self.split_heads(t) for t in (q, k))
-        q = maybe_bf16(q)
-        k = maybe_bf16(k)
 
         sim = einsum(q, k, 'b i h d, b j h d -> b i j h')
-        sim = maybe_bf16(sim)
 
         if exists(rel_pos_feats):
             rel_pos_encoding = self.to_rel_pos_encoding(rel_pos_feats)
             rel_pos_encoding = self.split_heads(rel_pos_encoding)
-            rel_pos_encoding = maybe_bf16(rel_pos_encoding)
 
             q_rel_bias, k_rel_bias = self.qk_rel_pos_bias
-            q_rel_bias = maybe_bf16(q_rel_bias)
-            k_rel_bias = maybe_bf16(k_rel_bias)
 
-            rel_q = relative_shift(maybe_bf16(einsum(q + q_rel_bias, rel_pos_encoding, 'b n h d, p h d -> b h n p')))
-            rel_k = relative_shift(maybe_bf16(einsum(k + k_rel_bias, rel_pos_encoding, 'b n h d, p h d -> b h n p')))
+            rel_q = relative_shift(einsum(q + q_rel_bias, rel_pos_encoding, 'b n h d, p h d -> b h n p'))
+            rel_k = relative_shift(einsum(k + k_rel_bias, rel_pos_encoding, 'b n h d, p h d -> b h n p'))
 
             rel_sim = add('b h i j, b h j i -> b i j h', rel_q, rel_k) * 0.5
-            rel_sim = maybe_bf16(rel_sim)
 
             sim = sim + rel_sim
-            sim = maybe_bf16(sim)
 
-        pairwise_from_sim = self.qk_to_pairwise(maybe_bf16(sim))
-        pairwise_from_sim = maybe_bf16(pairwise_from_sim)
+        pairwise_from_sim = self.qk_to_pairwise(sim)
 
         outer_q, outer_k = self.to_outer_sum(single).chunk(2, dim = -1)
-        outer_q = maybe_bf16(outer_q)
-        outer_k = maybe_bf16(outer_k)
 
         outer_sum = add('b i d, b j d -> b i j d', outer_q, outer_k)
-        outer_sum = maybe_bf16(outer_sum)
 
-        return maybe_bf16(outer_sum + pairwise_from_sim)
+        return outer_sum + pairwise_from_sim
 
 # pairwise attention is a single headed attention across rows, they said columns did not help
 
@@ -900,10 +874,6 @@ class PairwiseRowAttention(Module):
 
         q, k = self.to_qk(x).chunk(2, dim = -1)
         v = self.to_v(x)
-        q = maybe_bf16(q)
-        k = maybe_bf16(k)
-        v = maybe_bf16(v)
-
         # similarity
 
         sim = einsum(q, k, 'b n i d, b n j d -> b n i j')
@@ -915,7 +885,7 @@ class PairwiseRowAttention(Module):
 
         # aggregate
 
-        return maybe_bf16(einsum(attn, v, 'b n i j, b n j d -> b n i d'))
+        return einsum(attn, v, 'b n i j, b n j d -> b n i d')
 
 # feedforward for both single and pairwise
 
@@ -1026,11 +996,9 @@ class TransformerTower(Module):
 
         seq_len = single.shape[1]
 
-        single = maybe_bf16(single)
         pairwise = None
 
         rel_pos_feats = self.rel_pos_features(single)
-        rel_pos_feats = maybe_bf16(rel_pos_feats)
 
         if self.polar_pos_emb:
             polar_emb = self.polar_emb(seq_len)
@@ -1049,16 +1017,11 @@ class TransformerTower(Module):
 
             if exists(maybe_single_to_pair):
                 pairwise = maybe_single_to_pair(single, rel_pos_feats) + default(pairwise, 0.)
-                pairwise = maybe_bf16(pairwise)
                 pairwise = maybe_pairwise_attn(pairwise) + pairwise
-                pairwise = maybe_bf16(pairwise)
                 pairwise = maybe_pairwise_ff(pairwise) + pairwise
-                pairwise = maybe_bf16(pairwise)
 
             single = attn(single,  pairwise = pairwise, **pos_emb) + single
-            single = maybe_bf16(single)
             single = ff(single) + single
-            single = maybe_bf16(single)
 
         return single, pairwise
 
@@ -1138,8 +1101,6 @@ class TransformerUnet(Module):
         # embed with one hot and add skip
 
         dna_embed, skip = self.dna_embed(seq)
-        dna_embed = maybe_bf16(dna_embed)
-        skip = maybe_bf16(skip)
         skips.append(skip)
 
         # downs
@@ -1148,8 +1109,6 @@ class TransformerUnet(Module):
 
         for down in self.downs:
             x, skip = down(x, return_pre_pool = True)
-            x = maybe_bf16(x)
-            skip = maybe_bf16(skip)
             skips.append(skip)
 
         x = rearrange(x, 'b d n -> b n d')
@@ -1158,13 +1117,10 @@ class TransformerUnet(Module):
 
         if exists(pre_attend_embed):
             x = add('b n d, b d', x, pre_attend_embed)
-            x = maybe_bf16(x)
 
         # attention
         
         single, pairwise = self.transformer(x) # 1D 128bp resolution, 2D contact pairs
-        single = maybe_bf16(single)
-        pairwise = maybe_bf16(pairwise)
         
         # ups with skips from down
         
@@ -1173,7 +1129,6 @@ class TransformerUnet(Module):
         for up in self.ups:
             skip = skips.pop()
             x = up(x, skip = skip)
-            x = maybe_bf16(x)
             
         out = rearrange(x, 'b d n -> b n d') # 1D 1bp resolution
 
@@ -1205,9 +1160,7 @@ class DNAEmbed(Module):
 
         out = self.conv(x)
         out = out + self.pointwise(out)
-        out = maybe_bf16(out)
         pooled = self.pool(out) # think they downsample for dna embed block
-        pooled = maybe_bf16(pooled)
 
         return pooled, out
 
@@ -1263,7 +1216,7 @@ class OutputEmbedding(Module):
 
         x = add('b n d, b d', self.norm(x), emb)
 
-        return maybe_bf16(self.activation(x))
+        return self.activation(x)
 
 class OutputPairEmbedding(Module):
     def __init__(
@@ -1282,15 +1235,12 @@ class OutputPairEmbedding(Module):
         organism_index
     ):
         x = symmetrize(x)
-        x = maybe_bf16(x)
         x = self.norm(x)
-        x = maybe_bf16(x)
 
         organism_embed = self.embed(organism_index)
         x = add('b i j d, b d', x, organism_embed)
-        x = maybe_bf16(x)
 
-        return maybe_bf16(self.activation(x))
+        return self.activation(x)
 
 # some reflection to make adding prediction heads easy
 
