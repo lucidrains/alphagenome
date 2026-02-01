@@ -1711,6 +1711,27 @@ class AlphaGenome(Module):
             )
         )
 
+    def load_from_official_jax_model(
+        self,
+        model_version = "all_folds",
+        use_gpu = True,
+        strict = False
+    ):
+        try:
+            from alphagenome_pytorch.convert.convert_checkpoint import load_jax_checkpoint, convert_checkpoint
+        except ImportError as e:
+            print(f"Error: Missing required dependency for conversion. Details: {e}")
+            return
+
+        # Load and convert JAX weights
+
+        flat_params, flat_state = load_jax_checkpoint(model_version, use_gpu = use_gpu)
+        state_dict = convert_checkpoint(flat_params, flat_state)
+
+        # Load into PyTorch model
+        self.load_state_dict(state_dict, strict = strict)
+        return self
+
     def get_embeds(
         self,
         seq, # Int['b n']

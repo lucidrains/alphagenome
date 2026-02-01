@@ -130,23 +130,12 @@ uv pip install git+https://github.com/google-deepmind/alphagenome_research.git
 
 ```python
 from alphagenome_pytorch import AlphaGenome
-from alphagenome_pytorch.convert.convert_checkpoint import (
-    convert_checkpoint,
-    flatten_nested_dict,
-)
-from alphagenome_research.model.dna_model import create_from_huggingface
 
-# Load and convert JAX weights
-jax_model = create_from_huggingface("all_folds")
-state_dict = convert_checkpoint(
-    flatten_nested_dict(jax_model._params),
-    flatten_nested_dict(jax_model._state),
-)
-
-# Create PyTorch model with pretrained weights
+# Load AlphaGenome with official JAX weights
 model = AlphaGenome()
-model.add_reference_heads("human")  # Add official prediction heads
-model.load_state_dict(state_dict, strict=False)
+model.add_reference_heads("human")
+model.load_from_official_jax_model("all_folds")
+
 model.eval()
 ```
 
