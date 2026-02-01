@@ -1,6 +1,13 @@
+"""Dummy datasets for testing and development.
+
+These datasets generate random data for testing the model without requiring
+real TFRecord files.
+"""
+
 import numpy as np
 import torch
 from torch.utils.data import Dataset
+
 
 class DummyTargetsDataset(Dataset):
     def __init__(self, heads_cfg, seq_len, dim_contacts, n_splice_site_types = 5, n_splice_sites = 3, global_seed = 1234):
