@@ -1845,5 +1845,87 @@ class AlphaGenome(Module):
                 organism_out[head_name] = head_out
 
             out[organism] = organism_out
-        
+
         return out
+
+    @torch.no_grad()
+    def score_variant(
+        self,
+        seq_ref: Tensor,
+        seq_alt: Tensor,
+        organism_index: int | Tensor,
+        scorer,
+        settings,
+        variant,
+        interval,
+        track_metadata,
+    ):
+        """Score a genetic variant using reference and alternate sequences.
+
+        This is a convenience method for variant effect prediction that:
+        1. Runs forward pass on both reference and alternate sequences
+        2. Extracts masks and metadata using the scorer
+        3. Computes variant scores
+        4. Returns finalized results as AnnData
+
+        Args:
+            seq_ref: Reference sequence tensor [B, S, 4] or [S, 4]
+            seq_alt: Alternate sequence tensor [B, S, 4] or [S, 4]
+            organism_index: Organism index (0=human, 1=mouse)
+            scorer: VariantScorer instance (e.g., GeneVariantScorer, CenterMaskVariantScorer)
+            settings: Scorer-specific settings dataclass
+            variant: alphagenome.data.genome.Variant object
+            interval: alphagenome.data.genome.Interval object
+            track_metadata: Output metadata from the model
+
+        Returns:
+            anndata.AnnData: Variant scores with gene/track annotations
+
+        Example:
+            >>> from alphagenome_pytorch.scoring import GeneVariantScorer
+            >>> scorer = GeneVariantScorer(gene_mask_extractor)
+            >>> result = model.score_variant(
+            ...     ref_seq, alt_seq, organism_index=0,
+            ...     scorer=scorer, settings=settings,
+            ...     variant=variant, interval=interval,
+            ...     track_metadata=metadata
+            ... )
+        """
+        # Add batch dimension if needed
+        if seq_ref.dim() == 2:
+            seq_ref = seq_ref.unsqueeze(0)
+        if seq_alt.dim() == 2:
+            seq_alt = seq_alt.unsqueeze(0)
+
+        # Get predictions for both sequences
+        ref_out = self(seq_ref, organism_index)
+        alt_out = self(seq_alt, organism_index)
+
+        # Get masks and metadata
+        masks, mask_metadata = scorer.get_masks_and_metadata(
+            interval, variant, settings=settings, track_metadata=track_metadata
+        )
+
+        # Score the variant
+        scores = scorer.score_variant(
+            ref_out, alt_out,
+            masks=masks,
+            settings=settings,
+            variant=variant,
+            interval=interval,
+        )
+
+        # Convert scores to numpy for finalization
+        import numpy as np
+        scores_np = {
+            k: v.cpu().numpy() if isinstance(v, Tensor) else v
+            for k, v in scores.items()
+        }
+
+        # Finalize and return AnnData
+        return scorer.finalize_variant(
+            scores_np,
+            track_metadata=track_metadata,
+            mask_metadata=mask_metadata,
+            settings=settings,
+        )

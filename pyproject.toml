@@ -58,6 +58,25 @@ convert = [
     "aiohttp"
 ]
 
+# Dependencies for variant/interval scoring and evaluation
+scoring = [
+    "anndata>=0.10",
+    "pandas>=2.0",
+    "pyranges>=0.1",
+    "alphagenome-research @ git+https://github.com/google-deepmind/alphagenome_research.git",
+]
+
+# Dependencies for data loading from TFRecords
+data = [
+    "tensorflow>=2.15",
+    "pandas>=2.0",
+]
+
+# All optional dependencies
+all = [
+    "alphagenome-pytorch[test,convert,scoring,data]",
+]
+
 [tool.pytest.ini_options]
 pythonpath = [
   "."
