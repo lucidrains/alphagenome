@@ -266,7 +266,7 @@ class DNAModel:
 
         # Determine which heads to filter
         organism_str = organism or 'human'
-        heads_dict = self.model.heads.get(organism_str, {})
+        heads_dict = self.model.heads[organism_str] if organism_str in self.model.heads else {}
         head_names = set(requested_outputs) if requested_outputs else set(heads_dict.keys())
 
         track_masks = {}
@@ -387,6 +387,16 @@ class DNAModel:
 
         # Convert requested_outputs to head names
         requested_heads = set(requested_outputs) if requested_outputs else None
+
+        # If splice junctions are requested, ensure splice_sites_classification is also
+        # included in the first pass (needed to infer splice site positions)
+        if (
+            include_splice_junctions
+            and splice_site_positions is None
+            and requested_heads is not None
+            and 'splice_sites_junction' in requested_heads
+        ):
+            requested_heads = requested_heads | {'splice_sites_classification'}
 
         # Resolve ontology terms to track masks
         track_masks = self._resolve_track_masks(organism, requested_outputs, ontology_terms)
@@ -728,12 +738,24 @@ class DNAModel:
             requested_ontologies=parsed_ontologies,
         )
 
-        # Run prediction
+        # Convert OutputType enums to head names for selective execution
+        head_names = set()
+        for output_type in requested_outputs:
+            output_name = output_type.name if hasattr(output_type, 'name') else str(output_type)
+            for head, mapped_name in _HEAD_TO_OUTPUT_NAME.items():
+                if mapped_name == output_name:
+                    head_names.add(head)
+                    break
+
+        # Run prediction with selective head execution
+        # Note: Don't pass ontology_terms here - filtering happens in
+        # _construct_output_from_predictions using track_masks
         predictions = self.predict(
             sequence,
             organism=organism_str,
             include_splice_junctions=True,
             no_grad=True,
+            requested_outputs=head_names if head_names else None,
         )
 
         # Extract and filter predictions, then wrap in Output
@@ -795,18 +817,31 @@ class DNAModel:
             requested_ontologies=parsed_ontologies,
         )
 
-        # Run predictions on both sequences
+        # Convert OutputType enums to head names for selective execution
+        head_names = set()
+        for output_type in requested_outputs:
+            output_name = output_type.name if hasattr(output_type, 'name') else str(output_type)
+            for head, mapped_name in _HEAD_TO_OUTPUT_NAME.items():
+                if mapped_name == output_name:
+                    head_names.add(head)
+                    break
+
+        # Run predictions on both sequences with selective head execution
+        # Note: Don't pass ontology_terms here - filtering happens in
+        # _construct_output_from_predictions using track_masks
         ref_predictions = self.predict(
             ref_sequence,
             organism=organism_str,
             include_splice_junctions=True,
             no_grad=True,
+            requested_outputs=head_names if head_names else None,
         )
         alt_predictions = self.predict(
             alt_sequence,
             organism=organism_str,
             include_splice_junctions=True,
             no_grad=True,
+            requested_outputs=head_names if head_names else None,
         )
 
         # Wrap in VariantOutput
@@ -930,6 +965,9 @@ def _to_numpy(x) -> np.ndarray | None:
     if isinstance(x, np.ndarray):
         return x
     if isinstance(x, Tensor):
+        # Convert bfloat16 to float32 since numpy doesn't support bfloat16
+        if x.dtype == torch.bfloat16:
+            x = x.float()
         return x.detach().cpu().numpy()
     return np.asarray(x)
 
@@ -985,6 +1023,47 @@ def _construct_output_from_predictions(
     from alphagenome.models import dna_output
     from alphagenome_research.model.variant_scoring import splice_junction
 
+    def _unscale_track_predictions(
+        prediction: np.ndarray,
+        output_type: dna_output.OutputType,
+        track_metadata: pd.DataFrame,
+    ) -> np.ndarray:
+        """Match JAX experimental-scale predictions for genome-track outputs."""
+        if output_type not in {
+            dna_output.OutputType.ATAC,
+            dna_output.OutputType.CAGE,
+            dna_output.OutputType.DNASE,
+            dna_output.OutputType.RNA_SEQ,
+            dna_output.OutputType.PROCAP,
+            dna_output.OutputType.CHIP_HISTONE,
+            dna_output.OutputType.CHIP_TF,
+        }:
+            return prediction
+
+        if track_metadata is None or 'nonzero_mean' not in track_metadata.columns:
+            return prediction
+
+        track_means = track_metadata['nonzero_mean'].to_numpy(dtype=np.float32)
+        if track_means.size == 0:
+            return prediction
+
+        pred = prediction.astype(np.float32, copy=False)
+
+        # Inverse of JAX soft-clip used in predictions_scaling.
+        soft_clip_value = 10.0
+        pred = np.where(
+            pred > soft_clip_value,
+            (pred + soft_clip_value) ** 2 / (4 * soft_clip_value),
+            pred,
+        )
+
+        if output_type == dna_output.OutputType.RNA_SEQ:
+            pred = np.power(pred, 1.0 / 0.75)
+
+        resolution = metadata.resolution(output_type)
+        pred = pred * (track_means * resolution)
+        return pred
+
     # Extract predictions to OutputType mapping
     extracted = _extract_predictions(predictions)
 
@@ -1011,6 +1090,8 @@ def _construct_output_from_predictions(
         # Remove batch dimension if present
         if prediction.ndim >= 2 and prediction.shape[0] == 1:
             prediction = prediction[0]
+
+        prediction = _unscale_track_predictions(prediction, output_type, track_metadata)
 
         # Filter by mask
         filtered_pred = prediction[..., mask]
@@ -1061,12 +1142,13 @@ def _construct_output_from_predictions(
             if start < end
         ]
 
-        # Filter by mask (tile mask for both strands)
-        tiled_mask = np.tile(mask, 2)
-
+        # Filter by mask
+        # Note: unstack_junction_predictions already separates strands, so
+        # junction_predictions has shape [num_junctions, T] where T is the number
+        # of tracks (not T*2). Apply mask directly without tiling.
         return junction_data.JunctionData(
             junctions=np.asarray(junctions),
-            values=junction_predictions[..., tiled_mask],
+            values=junction_predictions[..., mask],
             metadata=junction_metadata[mask],
             interval=interval,
         )
