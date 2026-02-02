@@ -25,8 +25,9 @@ _ALLOW_TF32 = os.environ.get("ALPHAGENOME_ALLOW_TF32", "1") == "1"
 if torch.cuda.is_available():
     torch.backends.cuda.matmul.allow_tf32 = _ALLOW_TF32
     torch.backends.cudnn.allow_tf32 = _ALLOW_TF32
-# Allow native bf16 compute paths in attention (disabled by default).
-_ALLOW_NATIVE_BF16 = os.environ.get("ALPHAGENOME_TORCH_BF16", "0") == "1"
+# Allow native bf16 compute paths in attention (enabled by default for better
+# performance on modern GPUs). Set ALPHAGENOME_TORCH_BF16=0 to disable.
+_ALLOW_NATIVE_BF16 = os.environ.get("ALPHAGENOME_TORCH_BF16", "1") == "1"
 
 # ein notation
 
@@ -1983,6 +1984,20 @@ class AlphaGenome(Module):
                     result[k] = v
             return result
         return head_output
+
+    def compile(self, **compile_kwargs):
+        """Compile the model with torch.compile for optimized inference.
+
+        Args:
+            **compile_kwargs: Arguments passed to torch.compile (mode, backend, etc.)
+
+        Returns:
+            Compiled model
+
+        Example:
+            model = AlphaGenome().compile(mode="reduce-overhead")
+        """
+        return torch.compile(self, **compile_kwargs)
 
     @torch.no_grad()
     def score_variant(

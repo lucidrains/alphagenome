@@ -78,8 +78,26 @@ def create(
     organisms: Sequence[str] = ('human', 'mouse'),
     checkpoint_path: str | None = None,
     strict: bool = False,
+    compile: bool = False,
+    compile_kwargs: Mapping[str, object] | None = None,
 ) -> 'DNAModel':
-    """Create a DNAModel wrapper with optional heads and checkpoint loading."""
+    """Create a DNAModel wrapper with optional heads and checkpoint loading.
+
+    Args:
+        model: Existing AlphaGenome model, or None to create a new one.
+        model_kwargs: Arguments passed to AlphaGenome() if creating new model.
+        settings: ModelSettings for convenience operations.
+        device: Device to move model to ('cuda', 'cpu', etc.).
+        add_reference_heads: If True, add JAX-aligned reference heads.
+        organisms: Organisms to add heads for (default: human, mouse).
+        checkpoint_path: Path to checkpoint file to load.
+        strict: If True, require exact state_dict match when loading.
+        compile: If True, compile the model with torch.compile for faster inference.
+        compile_kwargs: Arguments passed to torch.compile (mode, backend, etc.).
+
+    Returns:
+        DNAModel wrapper around the AlphaGenome model.
+    """
     if model is None:
         model = AlphaGenome(**(model_kwargs or {}))
     if add_reference_heads:
@@ -89,6 +107,8 @@ def create(
         checkpoint = torch.load(checkpoint_path, map_location='cpu')
         state_dict = checkpoint.get('model_state_dict', checkpoint)
         model.load_state_dict(state_dict, strict=strict)
+    if compile:
+        model = torch.compile(model, **(compile_kwargs or {}))
     return DNAModel(model, settings=settings, device=device)
 
 
