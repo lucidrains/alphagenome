@@ -236,6 +236,80 @@ class DNAModel:
             return next(iter(predictions.keys()))
         return None
 
+    def _resolve_track_masks(
+        self,
+        organism: str | None,
+        requested_outputs: Iterable[str] | None,
+        ontology_terms: Iterable[str] | None,
+    ) -> dict[str, Tensor] | None:
+        """Convert ontology terms to per-head track masks.
+
+        Args:
+            organism: Organism name ('human', 'mouse').
+            requested_outputs: Head names to filter (e.g., 'rna_seq', 'cage').
+            ontology_terms: Cell type/tissue ontology CURIEs (e.g., 'EFO:0001187').
+
+        Returns:
+            Dict mapping head names to boolean tensors, or None if no filtering.
+        """
+        if ontology_terms is None:
+            return None
+
+        # Convert organism string to enum for metadata lookup
+        _, organism_enum = self._convert_organism(organism)
+
+        metadata = self._metadata.get(organism_enum)
+        if metadata is None:
+            return None
+
+        ontology_curies = set(ontology_terms)
+
+        # Determine which heads to filter
+        organism_str = organism or 'human'
+        heads_dict = self.model.heads.get(organism_str, {})
+        head_names = set(requested_outputs) if requested_outputs else set(heads_dict.keys())
+
+        track_masks = {}
+        for head_name in head_names:
+            # Try to get metadata for this head
+            # Map head name to output type for metadata lookup
+            output_name = _HEAD_TO_OUTPUT_NAME.get(head_name)
+            if output_name is None:
+                continue
+
+            try:
+                from alphagenome.models import dna_output
+                output_type = dna_output.OutputType[output_name]
+                track_metadata = metadata.get(output_type)
+            except (KeyError, AttributeError):
+                continue
+
+            if track_metadata is None:
+                continue
+
+            # Check if metadata has ontology_curie field
+            if not hasattr(track_metadata, 'ontology_curie') and not isinstance(track_metadata, pd.DataFrame):
+                continue
+
+            try:
+                if isinstance(track_metadata, pd.DataFrame):
+                    curies = track_metadata['ontology_curie'].values
+                else:
+                    curies = track_metadata.ontology_curie
+            except (AttributeError, KeyError):
+                continue
+
+            # Create boolean mask for tracks matching any of the ontology terms
+            mask = torch.tensor(
+                [str(curie) in ontology_curies for curie in curies],
+                dtype=torch.bool,
+                device=self.device,
+            )
+
+            track_masks[head_name] = mask
+
+        return track_masks if track_masks else None
+
     def _infer_splice_site_positions(self, splice_logits: Tensor) -> Tensor:
         probs = torch.softmax(splice_logits, dim=-1)
         batch, seq_len, _ = probs.shape
@@ -297,6 +371,8 @@ class DNAModel:
         splice_site_positions: Tensor | None = None,
         return_all_organisms: bool = False,
         no_grad: bool = True,
+        requested_outputs: Iterable[str] | None = None,
+        ontology_terms: Iterable[str] | None = None,
         **head_kwargs,
     ):
         tokens = _as_token_tensor(sequences).to(self.device)
@@ -309,12 +385,24 @@ class DNAModel:
         if splice_site_positions is not None and 'splice_site_positions' not in head_kwargs:
             head_kwargs = {**head_kwargs, 'splice_site_positions': splice_site_positions}
 
-        def _forward():
-            return self.model(tokens, organism_index_tensor, **head_kwargs)
+        # Convert requested_outputs to head names
+        requested_heads = set(requested_outputs) if requested_outputs else None
+
+        # Resolve ontology terms to track masks
+        track_masks = self._resolve_track_masks(organism, requested_outputs, ontology_terms)
+
+        def _inference():
+            return self.model.inference(
+                tokens,
+                organism_index_tensor,
+                requested_heads=requested_heads,
+                track_masks=track_masks,
+                **head_kwargs,
+            )
 
         context = torch.no_grad if no_grad else torch.enable_grad
         with context():
-            predictions = _forward()
+            predictions = _inference()
 
             if (
                 include_splice_junctions
@@ -334,11 +422,13 @@ class DNAModel:
                 if splice_logits is None:
                     return predictions if return_all_organisms else organism_preds
                 splice_site_positions = self._infer_splice_site_positions(splice_logits)
-                # Add splice_site_positions to head_kwargs for the second forward pass
+                # Add splice_site_positions to head_kwargs for the second inference pass
                 head_kwargs = {**head_kwargs, 'splice_site_positions': splice_site_positions}
-                predictions = self.model(
+                predictions = self.model.inference(
                     tokens,
                     organism_index_tensor,
+                    requested_heads=requested_heads,
+                    track_masks=track_masks,
                     **head_kwargs,
                 )
 
@@ -368,12 +458,21 @@ class DNAModel:
         interval,
         track_metadata,
         no_grad: bool = True,
+        requested_outputs: Iterable[str] | None = None,
+        ontology_terms: Iterable[str] | None = None,
     ):
         seq_ref_tensor = _as_token_tensor(seq_ref).to(self.device)
         seq_alt_tensor = _as_token_tensor(seq_alt).to(self.device)
         organism_index_tensor = self._resolve_organism_index(
             organism, organism_index, seq_ref_tensor.shape[0]
         )
+
+        # Convert requested_outputs to head names
+        requested_heads = set(requested_outputs) if requested_outputs else None
+
+        # Resolve ontology terms to track masks
+        track_masks = self._resolve_track_masks(organism, requested_outputs, ontology_terms)
+
         context = torch.no_grad if no_grad else torch.enable_grad
         with context():
             return self.model.score_variant(
@@ -386,6 +485,8 @@ class DNAModel:
                 interval=interval,
                 track_metadata=track_metadata,
                 organism=organism,
+                requested_heads=requested_heads,
+                track_masks=track_masks,
             )
 
     def ism(
@@ -400,6 +501,8 @@ class DNAModel:
         batch_size: int = 32,
         no_grad: bool = True,
         return_predictions: bool = False,
+        requested_outputs: Iterable[str] | None = None,
+        ontology_terms: Iterable[str] | None = None,
     ) -> dict[str, np.ndarray]:
         tokens = _as_token_tensor(sequence).to(self.device)
         if tokens.shape[0] != 1:
@@ -413,9 +516,33 @@ class DNAModel:
         if output_name is None:
             raise ValueError('output_key must be a string or enum with a name attribute.')
 
+        # Determine head name from output_key
+        head_name = None
+        for candidate, mapped in _HEAD_TO_OUTPUT_NAME.items():
+            if mapped == output_name:
+                head_name = candidate
+                break
+
+        # Convert requested_outputs to head names (include the output_key head)
+        if requested_outputs is not None:
+            requested_heads = set(requested_outputs)
+        elif head_name is not None:
+            # If no requested_outputs specified, only run the needed head for efficiency
+            requested_heads = {head_name}
+        else:
+            requested_heads = None
+
+        # Resolve ontology terms to track masks
+        track_masks = self._resolve_track_masks(organism, requested_outputs, ontology_terms)
+
         context = torch.no_grad if no_grad else torch.enable_grad
         with context():
-            ref_preds = self.model(tokens, organism_index_tensor)
+            ref_preds = self.model.inference(
+                tokens,
+                organism_index_tensor,
+                requested_heads=requested_heads,
+                track_masks=track_masks,
+            )
             if isinstance(ref_preds, dict):
                 organism_key = self._pick_organism_key(
                     ref_preds, organism, return_all_organisms=False
@@ -424,11 +551,6 @@ class DNAModel:
                     raise ValueError('Provide organism=... when multiple organisms exist.')
                 ref_preds = ref_preds[organism_key]
 
-            head_name = None
-            for candidate, mapped in _HEAD_TO_OUTPUT_NAME.items():
-                if mapped == output_name:
-                    head_name = candidate
-                    break
             if head_name is None or head_name not in ref_preds:
                 raise KeyError(
                     f'Output {output_name!r} not found in model predictions.'
@@ -444,7 +566,7 @@ class DNAModel:
 
         seq_len = tokens.shape[1]
         positions_list = list(positions) if positions is not None else list(range(seq_len))
-        alt_bases = [b for b in alt_bases.upper() if b in _DNA_TO_INDEX]
+        alt_bases_list = [b for b in alt_bases.upper() if b in _DNA_TO_INDEX]
 
         ref_tokens = tokens[0].cpu().numpy()
         ref_bases = _INDEX_TO_DNA[ref_tokens]
@@ -453,7 +575,7 @@ class DNAModel:
         for pos in positions_list:
             if pos < 0 or pos >= seq_len:
                 continue
-            for base in alt_bases:
+            for base in alt_bases_list:
                 if base == ref_bases[pos]:
                     continue
                 mutations.append((pos, base))
@@ -475,7 +597,12 @@ class DNAModel:
                 batch_tokens[row, pos] = _DNA_TO_INDEX[base]
 
             with context():
-                preds = self.model(batch_tokens, organism_index_tensor.repeat(len(batch_mutations)))
+                preds = self.model.inference(
+                    batch_tokens,
+                    organism_index_tensor.repeat(len(batch_mutations)),
+                    requested_heads=requested_heads,
+                    track_masks=track_masks,
+                )
                 if isinstance(preds, dict):
                     organism_key = self._pick_organism_key(
                         preds, organism, return_all_organisms=False

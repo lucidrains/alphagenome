@@ -1849,6 +1849,141 @@ class AlphaGenome(Module):
 
         return out
 
+    def inference(
+        self,
+        seq: Tensor,
+        organism_index: int | Tensor,
+        *,
+        requested_heads: set[str] | None = None,
+        track_masks: dict[str, Tensor] | None = None,
+        embeds: Embeds | None = None,
+        return_embeds: bool = False,
+        **head_kwargs,
+    ) -> dict[str, dict] | tuple[dict[str, dict], Embeds]:
+        """Memory-efficient inference with selective head execution.
+
+        This method allows running only a subset of heads and applying track
+        masks for memory-efficient inference. Unlike forward(), it does not
+        return raw embeddings by default and is optimized for production use.
+
+        Args:
+            seq: Input DNA sequence tensor [B, S] (tokenized integers 0-3).
+            organism_index: Organism index (0=human, 1=mouse) or batch tensor.
+            requested_heads: Set of head names to run. None = all heads.
+            track_masks: Optional per-head boolean masks for track filtering.
+                Keys are head names, values are boolean tensors indicating
+                which tracks to keep.
+            embeds: Precomputed embeddings for reuse (from get_embeds()).
+            return_embeds: If True, also return embeddings as second element.
+            **head_kwargs: Additional kwargs passed to head forward methods
+                (e.g., splice_site_positions).
+
+        Returns:
+            If return_embeds=False:
+                Dict[organism][head_name] -> predictions (optionally masked).
+            If return_embeds=True:
+                Tuple of (predictions dict, Embeds namedtuple).
+
+        Example:
+            >>> # Run only RNA-seq and CAGE heads
+            >>> outputs = model.inference(
+            ...     seq, organism_index=0,
+            ...     requested_heads={'rna_seq', 'cage'},
+            ... )
+            >>> # With track filtering
+            >>> track_masks = {'rna_seq': torch.tensor([True, False, True, ...])}
+            >>> outputs = model.inference(seq, 0, track_masks=track_masks)
+            >>> # Embedding reuse for variant scoring
+            >>> embeds = model.get_embeds(ref_seq, 0)
+            >>> ref_out = model.inference(ref_seq, 0, embeds=embeds)
+            >>> alt_out = model.inference(alt_seq, 0)
+        """
+        # Handle int organism_index (0 for human, 1 for mouse)
+        if isinstance(organism_index, int):
+            batch = seq.shape[0]
+            organism_index = torch.full((batch,), organism_index, device=seq.device)
+
+        # Compute or reuse embeddings
+        if embeds is None:
+            embeds = self.get_embeds(seq, organism_index)
+
+        # Early return if no heads
+        if len(self.heads) == 0:
+            return (embeds if return_embeds else {})
+
+        embeds_1bp, embeds_128bp, embeds_pair = embeds
+
+        head_inputs = dict(
+            embeds_1bp=embeds_1bp,
+            embeds_128bp=embeds_128bp,
+            embeds_pair=embeds_pair,
+            organism_index=organism_index,
+        )
+        assert is_disjoint(set(head_inputs.keys()), set(head_kwargs.keys()))
+
+        head_inputs.update(**head_kwargs)
+        head_inputs.setdefault("splice_site_positions", None)
+
+        out = dict()
+
+        for organism, heads in self.heads.items():
+            organism_head_args = self.head_forward_arg_names[organism]
+            organism_head_arg_map = self.head_forward_arg_maps[organism]
+
+            organism_out = dict()
+
+            for head_name, head in heads.items():
+                # Skip if not in requested_heads
+                if requested_heads is not None and head_name not in requested_heads:
+                    continue
+
+                # Get the inputs needed for the head
+                head_args = organism_head_args[head_name]
+                head_arg_map = organism_head_arg_map[head_name]
+
+                kwargs = {head_arg: head_inputs[head_arg] for head_arg in head_args}
+
+                # Remap the kwargs
+                kwargs = {(head_arg_map.get(k, k)): v for k, v in kwargs.items()}
+
+                # Forward gathered inputs through the specific head
+                head_out = head(**kwargs)
+
+                # Apply track mask (early slicing for memory efficiency)
+                if track_masks and head_name in track_masks:
+                    head_out = self._apply_track_mask(head_out, track_masks[head_name])
+
+                organism_out[head_name] = head_out
+
+            if organism_out:
+                out[organism] = organism_out
+
+        return (out, embeds) if return_embeds else out
+
+    def _apply_track_mask(self, head_output, mask: Tensor):
+        """Slice output to only include masked tracks.
+
+        Args:
+            head_output: Output from a prediction head (Tensor or dict).
+            mask: Boolean tensor indicating which tracks to keep.
+
+        Returns:
+            Filtered output with only the masked tracks.
+        """
+        if isinstance(head_output, Tensor):
+            # Standard tensor output: [..., num_tracks]
+            return head_output[..., mask]
+        elif isinstance(head_output, dict):
+            # Dict output (e.g., GenomeTracksHead returns dict with resolutions)
+            result = {}
+            for k, v in head_output.items():
+                if isinstance(v, Tensor) and v.dim() >= 2:
+                    result[k] = v[..., mask]
+                else:
+                    result[k] = v
+            return result
+        return head_output
+
     @torch.no_grad()
     def score_variant(
         self,
@@ -1861,12 +1996,14 @@ class AlphaGenome(Module):
         interval,
         track_metadata,
         organism: str | None = None,
+        requested_heads: set[str] | None = None,
+        track_masks: dict[str, Tensor] | None = None,
         **head_kwargs,
     ):
         """Score a genetic variant using reference and alternate sequences.
 
         This is a convenience method for variant effect prediction that:
-        1. Runs forward pass on both reference and alternate sequences
+        1. Runs inference on both reference and alternate sequences
         2. Extracts masks and metadata using the scorer
         3. Computes variant scores
         4. Returns finalized results as AnnData
@@ -1884,6 +2021,8 @@ class AlphaGenome(Module):
             track_metadata: Output metadata from the model
             organism: Optional organism key for selecting outputs when multiple
                 organisms are present in the model output.
+            requested_heads: Set of head names to run. None = all heads.
+            track_masks: Optional per-head boolean masks for track filtering.
 
         Returns:
             anndata.AnnData: Variant scores with gene/track annotations
@@ -1895,7 +2034,8 @@ class AlphaGenome(Module):
             ...     ref_seq, alt_seq, organism_index=0,
             ...     scorer=scorer, settings=settings,
             ...     variant=variant, interval=interval,
-            ...     track_metadata=metadata
+            ...     track_metadata=metadata,
+            ...     requested_heads={'rna_seq'},  # Only run RNA-seq head
             ... )
         """
         def _looks_one_hot(seq: Tensor) -> bool:
@@ -1931,9 +2071,19 @@ class AlphaGenome(Module):
         seq_ref = _normalize_seq(seq_ref)
         seq_alt = _normalize_seq(seq_alt)
 
-        # Get predictions for both sequences
-        ref_out = self(seq_ref, organism_index, **head_kwargs)
-        alt_out = self(seq_alt, organism_index, **head_kwargs)
+        # Get predictions for both sequences using inference()
+        ref_out = self.inference(
+            seq_ref, organism_index,
+            requested_heads=requested_heads,
+            track_masks=track_masks,
+            **head_kwargs,
+        )
+        alt_out = self.inference(
+            seq_alt, organism_index,
+            requested_heads=requested_heads,
+            track_masks=track_masks,
+            **head_kwargs,
+        )
 
         # Select organism outputs if model returns multiple organisms
         if isinstance(ref_out, dict) and ref_out:
