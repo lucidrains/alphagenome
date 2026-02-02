@@ -1137,6 +1137,18 @@ class TransformerUnet(Module):
 # embedding
 
 class DNAEmbed(Module):
+    """A one-hot encoder for DNA sequences.
+
+      A -> [1, 0, 0, 0]
+      C -> [0, 1, 0, 0]
+      G -> [0, 0, 1, 0]
+      T -> [0, 0, 0, 1]
+    
+    all other characters are encoded as zeros [0, 0, 0, 0].
+
+    and here with input:
+    'A': 0, 'C': 1, 'G': 2, 'T': 3, 'N' and other characters: -1 
+    """
     def __init__(
         self,
         dim,
@@ -1155,7 +1167,10 @@ class DNAEmbed(Module):
         self,
         seq # Int['b n']
     ):
-        onehot = F.one_hot(seq, num_classes = self.dim_input).float()
+        onehot = F.one_hot(seq.clamp(min=0), num_classes = self.dim_input).float()
+        
+        # set zeros to other characters
+        onehot[seq < 0] = 0.0
         x = rearrange(onehot, 'b n d -> b d n')
 
         out = self.conv(x)
