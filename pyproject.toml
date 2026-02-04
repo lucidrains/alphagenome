@@ -70,8 +70,7 @@ convert = [
 scoring = [
     "anndata>=0.10",
     "pandas>=2.0",
-    "pyranges>=0.1",
-    "alphagenome-research @ git+https://github.com/google-deepmind/alphagenome_research.git",
+    "pyranges>=0.1"
 ]
 
 # Dependencies for data loading from TFRecords
@@ -85,8 +84,7 @@ data = [
 notebook = [
     "pandas>=2.0",
     "matplotlib>=3.8",
-    "pyarrow>=15.0",
-    "alphagenome-research @ git+https://github.com/google-deepmind/alphagenome_research.git",
+    "pyarrow>=15.0"
 ]
 
 # All optional dependencies
