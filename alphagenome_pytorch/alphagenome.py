@@ -25,8 +25,9 @@ _ALLOW_TF32 = os.environ.get("ALPHAGENOME_ALLOW_TF32", "1") == "1"
 if torch.cuda.is_available():
     torch.backends.cuda.matmul.allow_tf32 = _ALLOW_TF32
     torch.backends.cudnn.allow_tf32 = _ALLOW_TF32
-# Allow native bf16 compute paths in attention (disabled by default).
-_ALLOW_NATIVE_BF16 = os.environ.get("ALPHAGENOME_TORCH_BF16", "0") == "1"
+# Allow native bf16 compute paths in attention (enabled by default for better
+# performance on modern GPUs). Set ALPHAGENOME_TORCH_BF16=0 to disable.
+_ALLOW_NATIVE_BF16 = os.environ.get("ALPHAGENOME_TORCH_BF16", "1") == "1"
 
 # ein notation
 
@@ -1468,10 +1469,11 @@ class SpliceSitesJunctionHead(Module):
         embeddings_param
     ):
         batch, device = embeds_1bp.shape[0], embeds_1bp.device
-        indices = indices.to(device = device).long()
+        indices = indices.to(device = device, dtype = torch.long)
+        safe_indices = indices.clamp_min(0)
         batch_indices = arange(batch, device = device)[:, None]
 
-        x = embeds_1bp[batch_indices, indices]  # [B, P, H]
+        x = embeds_1bp[batch_indices, safe_indices]  # [B, P, H]
 
         params = embeddings_param.view(2, self.max_num_tissues, self.hidden_dim)
         scale = params[0]
@@ -1479,7 +1481,9 @@ class SpliceSitesJunctionHead(Module):
 
         x = x[:, :, None, :] * scale[None, None, :, :] + offset[None, None, :, :]
 
-        rotary_emb = self.rope(indices)
+        rotary_emb = self.rope(safe_indices)
+        # Expand rotary_emb to match the tissue dimension: [B, P, H] -> [B, P, 1, H]
+        rotary_emb = rotary_emb[:, :, None, :]
         x = apply_rotary_pos_emb(rotary_emb, x)
         return x
 
@@ -1506,8 +1510,8 @@ class SpliceSitesJunctionHead(Module):
         pos_counts = F.softplus(einsum(pos_donor_logits, pos_accept_logits, 'b d t h, b a t h -> b d a t'))
         neg_counts = F.softplus(einsum(neg_donor_logits, neg_accept_logits, 'b d t h, b a t h -> b d a t'))
 
-        pos_mask = (pos_donor_idx >= 0) & (pos_accept_idx >= 0)
-        neg_mask = (neg_donor_idx >= 0) & (neg_accept_idx >= 0)
+        pos_mask = (pos_donor_idx >= 0)[:, :, None] & (pos_accept_idx >= 0)[:, None, :]
+        neg_mask = (neg_donor_idx >= 0)[:, :, None] & (neg_accept_idx >= 0)[:, None, :]
 
         pos_counts = pos_counts * pos_mask[..., None]
         neg_counts = neg_counts * neg_mask[..., None]
@@ -1809,11 +1813,10 @@ class AlphaGenome(Module):
             single_repr = unet_transformer_out.single_repr,
             pairwise_repr = unet_transformer_out.pairwise_repr,
         )
-        head_inputs.setdefault("splice_site_positions", None)
-
         assert is_disjoint(set(head_inputs.keys()), set(head_kwargs.keys()))
 
         head_inputs.update(**head_kwargs)
+        head_inputs.setdefault("splice_site_positions", None)
 
         out = dict()
 
@@ -1845,5 +1848,499 @@ class AlphaGenome(Module):
                 organism_out[head_name] = head_out
 
             out[organism] = organism_out
-        
+
         return out
+
+    def inference(
+        self,
+        seq: Tensor,
+        organism_index: int | Tensor,
+        *,
+        requested_heads: set[str] | None = None,
+        track_masks: dict[str, Tensor] | None = None,
+        embeds: Embeds | None = None,
+        return_embeds: bool = False,
+        **head_kwargs,
+    ) -> dict[str, dict] | tuple[dict[str, dict], Embeds]:
+        """Memory-efficient inference with selective head execution.
+
+        This method allows running only a subset of heads and applying track
+        masks for memory-efficient inference. Unlike forward(), it does not
+        return raw embeddings by default and is optimized for production use.
+
+        Args:
+            seq: Input DNA sequence tensor [B, S] (tokenized integers 0-3).
+            organism_index: Organism index (0=human, 1=mouse) or batch tensor.
+            requested_heads: Set of head names to run. None = all heads.
+            track_masks: Optional per-head boolean masks for track filtering.
+                Keys are head names, values are boolean tensors indicating
+                which tracks to keep.
+            embeds: Precomputed embeddings for reuse (from get_embeds()).
+            return_embeds: If True, also return embeddings as second element.
+            **head_kwargs: Additional kwargs passed to head forward methods
+                (e.g., splice_site_positions).
+
+        Returns:
+            If return_embeds=False:
+                Dict[organism][head_name] -> predictions (optionally masked).
+            If return_embeds=True:
+                Tuple of (predictions dict, Embeds namedtuple).
+
+        Example:
+            >>> # Run only RNA-seq and CAGE heads
+            >>> outputs = model.inference(
+            ...     seq, organism_index=0,
+            ...     requested_heads={'rna_seq', 'cage'},
+            ... )
+            >>> # With track filtering
+            >>> track_masks = {'rna_seq': torch.tensor([True, False, True, ...])}
+            >>> outputs = model.inference(seq, 0, track_masks=track_masks)
+            >>> # Embedding reuse for variant scoring
+            >>> embeds = model.get_embeds(ref_seq, 0)
+            >>> ref_out = model.inference(ref_seq, 0, embeds=embeds)
+            >>> alt_out = model.inference(alt_seq, 0)
+        """
+        # Handle int organism_index (0 for human, 1 for mouse)
+        if isinstance(organism_index, int):
+            batch = seq.shape[0]
+            organism_index = torch.full((batch,), organism_index, device=seq.device)
+
+        # Compute or reuse embeddings
+        if embeds is None:
+            embeds = self.get_embeds(seq, organism_index)
+
+        # Early return if no heads
+        if len(self.heads) == 0:
+            return (embeds if return_embeds else {})
+
+        embeds_1bp, embeds_128bp, embeds_pair = embeds
+
+        head_inputs = dict(
+            embeds_1bp=embeds_1bp,
+            embeds_128bp=embeds_128bp,
+            embeds_pair=embeds_pair,
+            organism_index=organism_index,
+        )
+        assert is_disjoint(set(head_inputs.keys()), set(head_kwargs.keys()))
+
+        head_inputs.update(**head_kwargs)
+        head_inputs.setdefault("splice_site_positions", None)
+
+        out = dict()
+
+        for organism, heads in self.heads.items():
+            organism_head_args = self.head_forward_arg_names[organism]
+            organism_head_arg_map = self.head_forward_arg_maps[organism]
+
+            organism_out = dict()
+
+            for head_name, head in heads.items():
+                # Skip if not in requested_heads
+                if requested_heads is not None and head_name not in requested_heads:
+                    continue
+
+                # Get the inputs needed for the head
+                head_args = organism_head_args[head_name]
+                head_arg_map = organism_head_arg_map[head_name]
+
+                kwargs = {head_arg: head_inputs[head_arg] for head_arg in head_args}
+
+                # Remap the kwargs
+                kwargs = {(head_arg_map.get(k, k)): v for k, v in kwargs.items()}
+
+                # Forward gathered inputs through the specific head
+                head_out = head(**kwargs)
+
+                # Apply track mask (early slicing for memory efficiency)
+                if track_masks and head_name in track_masks:
+                    head_out = self._apply_track_mask(head_out, track_masks[head_name])
+
+                organism_out[head_name] = head_out
+
+            if organism_out:
+                out[organism] = organism_out
+
+        return (out, embeds) if return_embeds else out
+
+    def _apply_track_mask(self, head_output, mask: Tensor):
+        """Slice output to only include masked tracks.
+
+        Args:
+            head_output: Output from a prediction head (Tensor or dict).
+            mask: Boolean tensor indicating which tracks to keep.
+
+        Returns:
+            Filtered output with only the masked tracks.
+        """
+        if isinstance(head_output, Tensor):
+            # Standard tensor output: [..., num_tracks]
+            return head_output[..., mask]
+        elif isinstance(head_output, dict):
+            # Dict output (e.g., GenomeTracksHead returns dict with resolutions)
+            result = {}
+            for k, v in head_output.items():
+                if isinstance(v, Tensor) and v.dim() >= 2:
+                    result[k] = v[..., mask]
+                else:
+                    result[k] = v
+            return result
+        return head_output
+
+    def compile(self, **compile_kwargs):
+        """Compile the model with torch.compile for optimized inference.
+
+        Args:
+            **compile_kwargs: Arguments passed to torch.compile (mode, backend, etc.)
+
+        Returns:
+            Compiled model
+
+        Example:
+            model = AlphaGenome().compile(mode="reduce-overhead")
+        """
+        return torch.compile(self, **compile_kwargs)
+
+    @torch.no_grad()
+    def score_variant(
+        self,
+        seq_ref: Tensor,
+        seq_alt: Tensor,
+        organism_index: int | Tensor,
+        scorer,
+        settings,
+        variant,
+        interval,
+        track_metadata,
+        organism: str | None = None,
+        requested_heads: set[str] | None = None,
+        track_masks: dict[str, Tensor] | None = None,
+        **head_kwargs,
+    ):
+        """Score a genetic variant using reference and alternate sequences.
+
+        This is a convenience method for variant effect prediction that:
+        1. Runs inference on both reference and alternate sequences
+        2. Extracts masks and metadata using the scorer
+        3. Computes variant scores
+        4. Returns finalized results as AnnData
+
+        Args:
+            seq_ref: Reference sequence tensor [B, S] or [S] (tokenized), or
+                one-hot [B, S, 4] / [S, 4]
+            seq_alt: Alternate sequence tensor [B, S] or [S] (tokenized), or
+                one-hot [B, S, 4] / [S, 4]
+            organism_index: Organism index (0=human, 1=mouse)
+            scorer: VariantScorer instance (e.g., GeneVariantScorer, CenterMaskVariantScorer)
+            settings: Scorer-specific settings dataclass
+            variant: alphagenome.data.genome.Variant object
+            interval: alphagenome.data.genome.Interval object
+            track_metadata: Output metadata from the model
+            organism: Optional organism key for selecting outputs when multiple
+                organisms are present in the model output.
+            requested_heads: Set of head names to run. None = all heads.
+            track_masks: Optional per-head boolean masks for track filtering.
+
+        Returns:
+            anndata.AnnData: Variant scores with gene/track annotations
+
+        Example:
+            >>> from alphagenome_pytorch.scoring import GeneVariantScorer
+            >>> scorer = GeneVariantScorer(gene_mask_extractor)
+            >>> result = model.score_variant(
+            ...     ref_seq, alt_seq, organism_index=0,
+            ...     scorer=scorer, settings=settings,
+            ...     variant=variant, interval=interval,
+            ...     track_metadata=metadata,
+            ...     requested_heads={'rna_seq'},  # Only run RNA-seq head
+            ... )
+        """
+        def _looks_one_hot(seq: Tensor) -> bool:
+            if seq.dim() < 2 or seq.shape[-1] != 4:
+                return False
+            if seq.dtype.is_floating_point or seq.dtype == torch.bool:
+                return True
+            if seq.dtype in (
+                torch.uint8,
+                torch.int8,
+                torch.int16,
+                torch.int32,
+                torch.int64,
+            ):
+                seq_min = seq.min().item()
+                seq_max = seq.max().item()
+                return seq_min >= 0 and seq_max <= 1
+            return False
+
+        def _normalize_seq(seq: Tensor) -> Tensor:
+            if not isinstance(seq, Tensor):
+                raise TypeError('Sequence inputs must be torch.Tensors.')
+            if _looks_one_hot(seq):
+                seq = seq.argmax(dim=-1)
+            if seq.dim() == 1:
+                seq = seq.unsqueeze(0)
+            if seq.dim() != 2:
+                raise ValueError(
+                    f'Expected tokenized sequences with shape [B, S]. Got {tuple(seq.shape)}.'
+                )
+            return seq
+
+        seq_ref = _normalize_seq(seq_ref)
+        seq_alt = _normalize_seq(seq_alt)
+
+        # Get predictions for both sequences using inference()
+        ref_out = self.inference(
+            seq_ref, organism_index,
+            requested_heads=requested_heads,
+            track_masks=track_masks,
+            **head_kwargs,
+        )
+        alt_out = self.inference(
+            seq_alt, organism_index,
+            requested_heads=requested_heads,
+            track_masks=track_masks,
+            **head_kwargs,
+        )
+
+        # Select organism outputs if model returns multiple organisms
+        if isinstance(ref_out, dict) and ref_out:
+            sample_value = next(iter(ref_out.values()))
+            if isinstance(sample_value, dict):
+                if organism is None:
+                    if len(ref_out) == 1:
+                        organism = next(iter(ref_out.keys()))
+                    else:
+                        raise ValueError(
+                            'Multiple organisms found in model output. '
+                            'Pass organism="..." to select the correct outputs.'
+                        )
+                if organism not in ref_out:
+                    raise KeyError(
+                        f'Organism {organism!r} not found in model output. '
+                        f'Available organisms: {list(ref_out.keys())}'
+                    )
+                ref_out = ref_out[organism]
+                alt_out = alt_out[organism]
+
+        # Normalize outputs to expected enum keys when possible
+        requested_output = getattr(settings, 'requested_output', None)
+        if requested_output is not None:
+            from enum import Enum
+
+            output_enum = type(requested_output) if isinstance(requested_output, Enum) else None
+
+            head_to_output_name = {
+                'atac': 'ATAC',
+                'cage': 'CAGE',
+                'dnase': 'DNASE',
+                'rna_seq': 'RNA_SEQ',
+                'procap': 'PROCAP',
+                'chip_histone': 'CHIP_HISTONE',
+                'chip_tf': 'CHIP_TF',
+                'contact_maps': 'CONTACT_MAPS',
+                'splice_sites_classification': 'SPLICE_SITES',
+                'splice_sites_usage': 'SPLICE_SITE_USAGE',
+                'splice_sites_junction': 'SPLICE_JUNCTIONS',
+            }
+
+            output_name_to_resolution = {
+                'ATAC': 1,
+                'CAGE': 1,
+                'DNASE': 1,
+                'RNA_SEQ': 1,
+                'PROCAP': 1,
+                'CHIP_HISTONE': 128,
+                'CHIP_TF': 128,
+                'SPLICE_SITES': 1,
+                'SPLICE_SITE_USAGE': 1,
+                'SPLICE_JUNCTIONS': 1,
+                'CONTACT_MAPS': 2048,
+            }
+
+            def _select_prediction(head_output, output_name: str):
+                if isinstance(head_output, dict):
+                    resolution = output_name_to_resolution.get(output_name)
+                    if resolution == 1 and 'scaled_predictions_1bp' in head_output:
+                        return head_output['scaled_predictions_1bp']
+                    if resolution == 128 and 'scaled_predictions_128bp' in head_output:
+                        return head_output['scaled_predictions_128bp']
+                    if resolution == 2048 and 'scaled_predictions_2048bp' in head_output:
+                        return head_output['scaled_predictions_2048bp']
+                return head_output
+
+            def _normalize_outputs(outputs):
+                if output_enum is None or not isinstance(outputs, dict):
+                    return outputs
+                mapped = {}
+                for head_name, head_output in outputs.items():
+                    output_name = head_to_output_name.get(head_name)
+                    if output_name is None:
+                        continue
+                    if output_name not in output_name_to_resolution:
+                        continue
+                    try:
+                        output_key = output_enum[output_name]
+                    except Exception:
+                        continue
+                    mapped[output_key] = _select_prediction(head_output, output_name)
+                return mapped if mapped else outputs
+
+            ref_out = _normalize_outputs(ref_out)
+            alt_out = _normalize_outputs(alt_out)
+
+            if isinstance(ref_out, dict) and requested_output not in ref_out:
+                raise KeyError(
+                    f'Requested output {requested_output!r} not found in model '
+                    'predictions. Ensure reference heads are added (e.g. '
+                    'add_reference_heads) or provide outputs keyed by the '
+                    'requested output enum.'
+                )
+
+        def _resolve_mapping_key(mapping, key):
+            if key in mapping:
+                return key
+            if hasattr(key, 'name'):
+                name = key.name
+                if name in mapping:
+                    return name
+                if name.lower() in mapping:
+                    return name.lower()
+                for candidate in mapping:
+                    if hasattr(candidate, 'name') and candidate.name == name:
+                        return candidate
+            if isinstance(key, str):
+                if key in mapping:
+                    return key
+                if key.lower() in mapping:
+                    return key.lower()
+                if key.upper() in mapping:
+                    return key.upper()
+                for candidate in mapping:
+                    if hasattr(candidate, 'name') and candidate.name == key.upper():
+                        return candidate
+            return None
+
+        def _apply_track_mask(prediction, mask):
+            if prediction is None or mask is None:
+                return prediction
+            if isinstance(prediction, dict) and 'predictions' in prediction:
+                pred = dict(prediction)
+                preds = pred.get('predictions')
+                if isinstance(preds, Tensor):
+                    tiled_mask = torch.from_numpy(mask).to(
+                        device=preds.device, dtype=torch.bool
+                    )
+                    tiled_mask = tiled_mask.repeat(2)
+                    pred['predictions'] = preds[..., tiled_mask]
+                elif preds is not None:
+                    pred['predictions'] = preds[..., np.tile(mask, 2)]
+                return pred
+            if isinstance(prediction, Tensor):
+                mask_tensor = torch.from_numpy(mask).to(
+                    device=prediction.device, dtype=torch.bool
+                )
+                return prediction[..., mask_tensor]
+            return prediction[..., mask]
+
+        def _reverse_complement_prediction(prediction, reindex):
+            if prediction is None or reindex is None:
+                return prediction
+            if isinstance(prediction, dict) and 'predictions' in prediction:
+                # Splice junction predictions are left as-is (strand handled in model).
+                return prediction
+            if isinstance(prediction, Tensor):
+                if prediction.dim() == 3:
+                    pred_rc = prediction.flip(1)
+                elif prediction.dim() == 4:
+                    pred_rc = prediction.flip(1).flip(2)
+                else:
+                    pred_rc = prediction
+                reindex_tensor = torch.as_tensor(
+                    reindex, device=pred_rc.device, dtype=torch.long
+                )
+                return pred_rc.index_select(-1, reindex_tensor)
+            if prediction.ndim == 3:
+                pred_rc = prediction[:, ::-1, :]
+            elif prediction.ndim == 4:
+                pred_rc = prediction[:, ::-1, ::-1, :]
+            else:
+                pred_rc = prediction
+            return pred_rc[..., reindex]
+
+        # Apply track masks if provided via metadata (padding mask)
+        metadata_for_masks = track_metadata
+        if (
+            requested_output is not None
+            and hasattr(metadata_for_masks, 'padding')
+            and isinstance(ref_out, dict)
+        ):
+            import numpy as np
+
+            padding = metadata_for_masks.padding
+            padding_key = _resolve_mapping_key(padding, requested_output)
+            if padding_key is not None:
+                mask = ~np.asarray(padding[padding_key])
+                output_key = _resolve_mapping_key(ref_out, requested_output) or requested_output
+                if output_key in ref_out:
+                    ref_out[output_key] = _apply_track_mask(ref_out[output_key], mask)
+                if output_key in alt_out:
+                    alt_out[output_key] = _apply_track_mask(alt_out[output_key], mask)
+
+                # Filter metadata to match masked predictions
+                if hasattr(track_metadata, 'get'):
+                    meta = track_metadata.get(padding_key)
+                    if meta is not None:
+                        try:
+                            meta = meta[mask]
+                        except Exception:
+                            pass
+                        track_metadata = {output_key: meta}
+
+        # Reverse complement predictions on negative strand when reindexing available
+        if (
+            requested_output is not None
+            and getattr(interval, 'negative_strand', False)
+            and hasattr(metadata_for_masks, 'strand_reindexing')
+            and isinstance(ref_out, dict)
+        ):
+            reindexing = metadata_for_masks.strand_reindexing
+            reindex_key = _resolve_mapping_key(reindexing, requested_output)
+            if reindex_key is not None:
+                reindex = reindexing[reindex_key]
+                output_key = _resolve_mapping_key(ref_out, requested_output) or requested_output
+                if output_key in ref_out:
+                    ref_out[output_key] = _reverse_complement_prediction(
+                        ref_out[output_key], reindex
+                    )
+                if output_key in alt_out:
+                    alt_out[output_key] = _reverse_complement_prediction(
+                        alt_out[output_key], reindex
+                    )
+
+        # Get masks and metadata
+        masks, mask_metadata = scorer.get_masks_and_metadata(
+            interval, variant, settings=settings, track_metadata=track_metadata
+        )
+
+        # Score the variant
+        scores = scorer.score_variant(
+            ref_out, alt_out,
+            masks=masks,
+            settings=settings,
+            variant=variant,
+            interval=interval,
+        )
+
+        # Convert scores to numpy for finalization
+        import numpy as np
+        scores_np = {
+            k: v.cpu().numpy() if isinstance(v, Tensor) else v
+            for k, v in scores.items()
+        }
+
+        # Finalize and return AnnData
+        return scorer.finalize_variant(
+            scores_np,
+            track_metadata=track_metadata,
+            mask_metadata=mask_metadata,
+            settings=settings,
+        )
