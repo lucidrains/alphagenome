@@ -1469,10 +1469,11 @@ class SpliceSitesJunctionHead(Module):
         embeddings_param
     ):
         batch, device = embeds_1bp.shape[0], embeds_1bp.device
-        indices = indices.to(device = device).long()
+        indices = indices.to(device = device, dtype = torch.long)
+        safe_indices = indices.clamp_min(0)
         batch_indices = arange(batch, device = device)[:, None]
 
-        x = embeds_1bp[batch_indices, indices]  # [B, P, H]
+        x = embeds_1bp[batch_indices, safe_indices]  # [B, P, H]
 
         params = embeddings_param.view(2, self.max_num_tissues, self.hidden_dim)
         scale = params[0]
@@ -1480,7 +1481,7 @@ class SpliceSitesJunctionHead(Module):
 
         x = x[:, :, None, :] * scale[None, None, :, :] + offset[None, None, :, :]
 
-        rotary_emb = self.rope(indices)
+        rotary_emb = self.rope(safe_indices)
         # Expand rotary_emb to match the tissue dimension: [B, P, H] -> [B, P, 1, H]
         rotary_emb = rotary_emb[:, :, None, :]
         x = apply_rotary_pos_emb(rotary_emb, x)
@@ -1509,8 +1510,8 @@ class SpliceSitesJunctionHead(Module):
         pos_counts = F.softplus(einsum(pos_donor_logits, pos_accept_logits, 'b d t h, b a t h -> b d a t'))
         neg_counts = F.softplus(einsum(neg_donor_logits, neg_accept_logits, 'b d t h, b a t h -> b d a t'))
 
-        pos_mask = (pos_donor_idx >= 0) & (pos_accept_idx >= 0)
-        neg_mask = (neg_donor_idx >= 0) & (neg_accept_idx >= 0)
+        pos_mask = (pos_donor_idx >= 0)[:, :, None] & (pos_accept_idx >= 0)[:, None, :]
+        neg_mask = (neg_donor_idx >= 0)[:, :, None] & (neg_accept_idx >= 0)[:, None, :]
 
         pos_counts = pos_counts * pos_mask[..., None]
         neg_counts = neg_counts * neg_mask[..., None]

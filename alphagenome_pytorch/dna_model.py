@@ -25,11 +25,12 @@ _DNA_TO_INDEX = {
     'C': 1,
     'G': 2,
     'T': 3,
-    'N': 0,
+    'N': -1,
 }
 
 _INDEX_TO_DNA = np.array(['A', 'C', 'G', 'T'])
 _PAD_VALUE = -1
+_NUM_SPLICE_CLASSES = 4
 
 _OUTPUT_NAME_TO_RESOLUTION = {
     'ATAC': 1,
@@ -64,8 +65,8 @@ _HEAD_TO_OUTPUT_NAME = {
 class ModelSettings:
     """Settings for convenience DNA model operations."""
 
-    num_splice_sites: int = 256
-    splice_site_threshold: float = 0.0
+    num_splice_sites: int = 512
+    splice_site_threshold: float = 0.1
 
 
 def create(
@@ -114,7 +115,7 @@ def create(
 
 def _encode_sequence(seq: str) -> Tensor:
     seq = seq.upper()
-    indices = [_DNA_TO_INDEX.get(base, 0) for base in seq]
+    indices = [_DNA_TO_INDEX.get(base, -1) for base in seq]
     return torch.tensor(indices, dtype=torch.long)
 
 
@@ -187,6 +188,7 @@ class DNAModel:
         device: torch.device | str | None = None,
         organism_map: Mapping[str, int] | None = None,
         fasta_extractors: Mapping['dna_model_types.Organism', 'fasta.FastaExtractor'] | None = None,
+        splice_site_extractors: Mapping['dna_model_types.Organism', object] | None = None,
         metadata: Mapping['dna_model_types.Organism', 'metadata_lib.AlphaGenomeOutputMetadata'] | None = None,
         output_metadata_by_organism: Mapping['dna_model_types.Organism', 'dna_output.OutputMetadata'] | None = None,
     ) -> None:
@@ -194,6 +196,7 @@ class DNAModel:
         self.settings = settings or ModelSettings()
         self.organism_map = dict(organism_map or {'human': 0, 'mouse': 1})
         self._fasta_extractors = fasta_extractors or {}
+        self._splice_site_extractors = splice_site_extractors or {}
         self._metadata = metadata or {}
         self._output_metadata_by_organism = output_metadata_by_organism or {}
         if device is not None:
@@ -330,27 +333,27 @@ class DNAModel:
 
         return track_masks if track_masks else None
 
-    def _infer_splice_site_positions(self, splice_logits: Tensor) -> Tensor:
-        probs = torch.softmax(splice_logits, dim=-1)
+    def _infer_splice_site_positions_from_probs(self, probs: Tensor) -> Tensor:
+        probs = probs.float()
         batch, seq_len, _ = probs.shape
         num_sites = min(self.settings.num_splice_sites, seq_len)
         pad_len = self.settings.num_splice_sites - num_sites
 
         positions = []
-        invalid_score = torch.finfo(probs.dtype).min
+        sentinel = seq_len
 
-        for class_idx in range(4):
+        for class_idx in range(_NUM_SPLICE_CLASSES):
             scores = probs[:, :, class_idx]
-            if self.settings.splice_site_threshold > 0:
-                scores = scores.masked_fill(
-                    scores < self.settings.splice_site_threshold, invalid_score
-                )
-
             top_values, top_indices = scores.topk(num_sites, dim=1)
+
             if self.settings.splice_site_threshold > 0:
-                top_indices = top_indices.masked_fill(
-                    top_values == invalid_score, _PAD_VALUE
-                )
+                invalid = top_values < self.settings.splice_site_threshold
+                top_indices = top_indices.masked_fill(invalid, sentinel)
+
+            top_indices, _ = top_indices.sort(dim=1)
+
+            if self.settings.splice_site_threshold > 0:
+                top_indices = top_indices.masked_fill(top_indices == sentinel, _PAD_VALUE)
 
             if pad_len > 0:
                 pad = torch.full(
@@ -364,6 +367,10 @@ class DNAModel:
             positions.append(top_indices)
 
         return torch.stack(positions, dim=1)
+
+    def _infer_splice_site_positions(self, splice_logits: Tensor) -> Tensor:
+        probs = torch.softmax(splice_logits.float(), dim=-1)
+        return self._infer_splice_site_positions_from_probs(probs)
 
     def embeddings(
         self,
@@ -837,6 +844,11 @@ class DNAModel:
             requested_ontologies=parsed_ontologies,
         )
 
+        splice_sites = None
+        splice_site_extractor = self._splice_site_extractors.get(organism_enum)
+        if splice_site_extractor is not None:
+            splice_sites = splice_site_extractor.extract(interval)
+
         # Convert OutputType enums to head names for selective execution
         head_names = set()
         for output_type in requested_outputs:
@@ -845,6 +857,46 @@ class DNAModel:
                 if mapped_name == output_name:
                     head_names.add(head)
                     break
+
+        splice_site_positions = None
+        if head_names and 'splice_sites_junction' in head_names:
+            splice_head = {'splice_sites_classification'}
+            ref_splice = self.predict(
+                ref_sequence,
+                organism=organism_str,
+                include_splice_junctions=False,
+                no_grad=True,
+                requested_outputs=splice_head,
+            )
+            alt_splice = self.predict(
+                alt_sequence,
+                organism=organism_str,
+                include_splice_junctions=False,
+                no_grad=True,
+                requested_outputs=splice_head,
+            )
+            ref_logits = ref_splice.get('splice_sites_classification')
+            alt_logits = alt_splice.get('splice_sites_classification')
+            if ref_logits is not None and alt_logits is not None:
+                ref_probs = torch.softmax(ref_logits.float(), dim=-1)
+                alt_probs = torch.softmax(alt_logits.float(), dim=-1)
+                merged_probs = torch.maximum(ref_probs, alt_probs)
+                if splice_sites is not None:
+                    splice_sites_tensor = torch.as_tensor(
+                        splice_sites,
+                        device=merged_probs.device,
+                        dtype=merged_probs.dtype,
+                    )
+                    if splice_sites_tensor.ndim == 2:
+                        splice_sites_tensor = splice_sites_tensor.unsqueeze(0)
+                    if splice_sites_tensor.shape[0] != merged_probs.shape[0]:
+                        splice_sites_tensor = splice_sites_tensor.expand(
+                            merged_probs.shape[0], -1, -1
+                        )
+                    merged_probs = torch.maximum(merged_probs, splice_sites_tensor)
+                splice_site_positions = self._infer_splice_site_positions_from_probs(
+                    merged_probs
+                )
 
         # Run predictions on both sequences with selective head execution
         # Note: Don't pass ontology_terms here - filtering happens in
@@ -855,6 +907,7 @@ class DNAModel:
             include_splice_junctions=True,
             no_grad=True,
             requested_outputs=head_names if head_names else None,
+            splice_site_positions=splice_site_positions,
         )
         alt_predictions = self.predict(
             alt_sequence,
@@ -862,6 +915,7 @@ class DNAModel:
             include_splice_junctions=True,
             no_grad=True,
             requested_outputs=head_names if head_names else None,
+            splice_site_positions=splice_site_positions,
         )
 
         # Wrap in VariantOutput
@@ -1213,6 +1267,7 @@ def create_from_jax_model(
         convert_checkpoint,
         flatten_nested_dict,
     )
+    from alphagenome_pytorch.alphagenome import set_update_running_var
 
     # Convert checkpoint
     flat_params = flatten_nested_dict(jax_model._params)
@@ -1230,6 +1285,7 @@ def create_from_jax_model(
     model.load_state_dict(state_dict, strict=strict)
     model.to(device)
     model.eval()
+    set_update_running_var(model, False)
 
     # Build output metadata by organism (without padding tracks)
     output_metadata_by_organism = {}
@@ -1248,6 +1304,7 @@ def create_from_jax_model(
         model,
         device=device,
         fasta_extractors=jax_model._fasta_extractors,
+        splice_site_extractors=getattr(jax_model, '_splice_site_extractors', None),
         metadata=jax_model._metadata,
         output_metadata_by_organism=output_metadata_by_organism,
     )

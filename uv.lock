@@ -164,7 +164,7 @@ wheels = [
 
 [[package]]
 name = "alphagenome-pytorch"
-version = "0.2.4"
+version = "0.2.7"
 source = { editable = "." }
 dependencies = [
     { name = "accelerate" },
@@ -185,6 +185,7 @@ dependencies = [
 
 [package.optional-dependencies]
 all = [
+    { name = "aiohttp" },
     { name = "alphagenome-research" },
     { name = "anndata" },
     { name = "dm-haiku" },
@@ -203,7 +204,7 @@ all = [
     { name = "tensorflow" },
 ]
 convert = [
-    { name = "alphagenome-research" },
+    { name = "aiohttp" },
     { name = "dm-haiku" },
     { name = "einshape" },
     { name = "huggingface-hub" },
@@ -245,8 +246,8 @@ dev = [
 requires-dist = [
     { name = "accelerate" },
     { name = "aiohttp", specifier = ">=3.13.3" },
+    { name = "aiohttp", marker = "extra == 'convert'" },
     { name = "alphagenome-pytorch", extras = ["test", "convert", "scoring", "data", "notebook"], marker = "extra == 'all'" },
-    { name = "alphagenome-research", marker = "extra == 'convert'", git = "https://github.com/google-deepmind/alphagenome_research.git" },
     { name = "alphagenome-research", marker = "extra == 'notebook'", git = "https://github.com/google-deepmind/alphagenome_research.git" },
     { name = "alphagenome-research", marker = "extra == 'scoring'", git = "https://github.com/google-deepmind/alphagenome_research.git" },
     { name = "anndata", marker = "extra == 'scoring'", specifier = ">=0.10" },
