@@ -10,7 +10,7 @@ The [official code](https://github.com/google-deepmind/alphagenome_research) has
 
 - [Miquel Anglada-Girotto](https://github.com/MiqG) for contributing the organism, output embedding, loss functions, and all the splicing prediction heads!
 
-- [Xinming Tu](https://github.com/XinmingTu) for aligning the architecture with the official JAX implementation, enabling pretrained weight compatibility, and contributing the regression test suite!
+- [Xinming Tu](https://github.com/XinmingTu) for aligning the architecture with the official JAX implementation, enabling pretrained weight compatibility, TFRecord dataset support, scoring and evaluation modules, and a test suite!
 
 ## Install
 
