@@ -17,13 +17,13 @@ This project is now being carried on by [Anshul Kundaje](https://med.stanford.ed
 ## Install
 
 ```bash
-pip install alphagenome-pytorch
+pip install .
 ```
 
 Or with [uv](https://docs.astral.sh/uv/) (recommended):
 
 ```bash
-uv pip install alphagenome-pytorch
+uv pip install .
 ```
 
 ### Environment Setup
