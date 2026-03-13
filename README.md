@@ -6,6 +6,8 @@ Implementation of [AlphaGenome](https://deepmind.google/discover/blog/alphagenom
 
 The [official code](https://github.com/google-deepmind/alphagenome_research) has been released!
 
+This project is now being carried on by Anshul Kundaje's lab [here](https://github.com/genomicsxai/alphagenome-pytorch)!
+
 ## Appreciation
 
 - [Miquel Anglada-Girotto](https://github.com/MiqG) for contributing the organism, output embedding, loss functions, and all the splicing prediction heads!
