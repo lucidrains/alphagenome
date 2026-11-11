@@ -4,6 +4,8 @@ These datasets generate random data for testing the model without requiring
 real TFRecord files.
 """
 
+from __future__ import annotations
+
 import numpy as np
 import torch
 from torch.utils.data import Dataset
@@ -11,10 +13,10 @@ from torch.utils.data import Dataset
 
 class DummyTargetsDataset(Dataset):
     def __init__(self, heads_cfg, seq_len, dim_contacts, n_splice_site_types = 5, n_splice_sites = 3, global_seed = 1234):
-        
+
         self.heads_cfg = heads_cfg
         self.global_seed = global_seed
-        
+
         self.len_1bp = seq_len
         self.len_128bp = seq_len // 128
         self.dim_contacts = dim_contacts
@@ -27,7 +29,7 @@ class DummyTargetsDataset(Dataset):
 
         item = {}
         for organism, config in self.heads_cfg.items():
-        
+
             item[organism] = {
                 'target_1bp_tracks': torch.rand(self.len_1bp, config['num_tracks_1bp']).clamp(min=0.01),
                 'target_128bp_tracks': torch.rand(self.len_128bp, config['num_tracks_128bp']).clamp(min=0.01),
@@ -37,7 +39,7 @@ class DummyTargetsDataset(Dataset):
                 'target_splice_juncs': torch.abs(torch.randn(self.n_splice_sites, self.n_splice_sites, config['num_splicing_contexts'])).clamp(min=0.01)
 
             }
-        
+
         return item
 
 class DummyGenomeDataset(Dataset):
@@ -52,7 +54,7 @@ class DummyGenomeDataset(Dataset):
 
     def __getitem__(self, idx):
         np.random.seed(self.global_seed + idx)
-        
+
         dna = torch.randint(0, 5, (self.seq_len,))
         organism_index = torch.randint(0, 2, (1,)).item()
         splice_donor_idx = torch.randint(0, self.seq_len, (3,))

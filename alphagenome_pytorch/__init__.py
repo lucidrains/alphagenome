@@ -1,86 +1,57 @@
 from __future__ import annotations
 
-from importlib import import_module
-
+from alphagenome_pytorch.alphagenome import (
+    AlphaGenome,
+    Attention,
+    BatchRMSNorm,
+    DownresBlock,
+    FeedForward,
+    JunctionsLoss,
+    MultinomialCrossEntropy,
+    MultinomialLoss,
+    PairwiseRowAttention,
+    PoissonLoss,
+    RelativePosFeatures,
+    RotaryEmbedding,
+    SoftClip,
+    TargetScaler,
+    TracksScaledPrediction,
+    TransformerTower,
+    TransformerUnet,
+    UpresBlock,
+    publication_heads_config,
+    set_update_running_var,
+)
+from alphagenome_pytorch.alphagenome2 import (
+    AlphaGenome2,
+    BinomialLoss,
+    ConditioningEmbedder,
+    FiLM,
+    GeneExpressionHead,
+    MethylationHead,
+    SingleCellAutoencoder,
+)
 from alphagenome_pytorch.config import AlphaGenomeConfig
-
-# Data loading utilities
 from alphagenome_pytorch.data import (
+    AlphaGenomeTFRecordDataset,
+    BundleName,
+    DataBatch,
     DummyGenomeDataset,
     DummyTargetsDataset,
-    AlphaGenomeTFRecordDataset,
-    DataBatch,
     collate_batch,
-    BundleName,
 )
+from alphagenome_pytorch.dna_model import DNAModel, ModelSettings, create_from_jax_model
+from alphagenome_pytorch.scoring import DirectGeneExpressionScorer
 
-_DNA_MODEL_ATTRS = {
-    'DNAModel',
-    'ModelSettings',
-    'create_from_jax_model',
-}
-
-_MODEL_ATTRS = {
-    'AlphaGenome',
-    'Attention',
-    'PairwiseRowAttention',
-    'RelativePosFeatures',
-    'RotaryEmbedding',
-    'FeedForward',
-    'TransformerTower',
-    'TransformerUnet',
-    'UpresBlock',
-    'DownresBlock',
-    'BatchRMSNorm',
-    'TargetScaler',
-    'MultinomialLoss',
-    'JunctionsLoss',
-    'TracksScaledPrediction',
-    'SoftClip',
-    'PoissonLoss',
-    'MultinomialCrossEntropy',
-    'set_update_running_var',
-    'publication_heads_config',
-}
-
-
-def __getattr__(name: str):
-    """Lazy import for optional modules and heavy model components."""
-    if name in _DNA_MODEL_ATTRS:
-        module = import_module('alphagenome_pytorch.dna_model')
-        value = getattr(module, name)
-        globals()[name] = value
-        return value
-    if name in _MODEL_ATTRS:
-        module = import_module('alphagenome_pytorch.alphagenome')
-        value = getattr(module, name)
-        globals()[name] = value
-        return value
-    if name == 'scoring':
-        module = import_module('alphagenome_pytorch.scoring')
-        globals()[name] = module
-        return module
-    if name == 'evals':
-        module = import_module('alphagenome_pytorch.evals')
-        globals()[name] = module
-        return module
-    raise AttributeError(f"module 'alphagenome_pytorch' has no attribute {name!r}")
-
-
-def __dir__() -> list[str]:
-    return sorted(
-        list(globals().keys())
-        + list(_DNA_MODEL_ATTRS)
-        + list(_MODEL_ATTRS)
-        + ['scoring', 'evals']
-    )
+from . import evals, scoring
 
 __all__ = [
-    # Core model
+    # core model
     'DNAModel',
     'ModelSettings',
     'create_from_jax_model',
     'AlphaGenome',
+    'AlphaGenome2',
     'AlphaGenomeConfig',
     'Attention',
     'PairwiseRowAttention',
@@ -101,14 +72,21 @@ __all__ = [
     'MultinomialCrossEntropy',
     'set_update_running_var',
     'publication_heads_config',
-    # Data loading
+    'ConditioningEmbedder',
+    'SingleCellAutoencoder',
+    'FiLM',
+    'MethylationHead',
+    'GeneExpressionHead',
+    'BinomialLoss',
+    'DirectGeneExpressionScorer',
+    # data loading
     'DummyGenomeDataset',
     'DummyTargetsDataset',
     'AlphaGenomeTFRecordDataset',
     'DataBatch',
     'collate_batch',
     'BundleName',
-    # Lazy-loaded modules
+    # submodules
     'scoring',
     'evals',
 ]

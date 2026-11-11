@@ -5,6 +5,8 @@ This module provides evaluation metrics and utilities for assessing model
 performance on genomic track prediction tasks.
 """
 
+from __future__ import annotations
+
 from alphagenome_pytorch.evals.regression_metrics import (
     PearsonRState,
     RegressionState,

@@ -25,7 +25,7 @@ from alphagenome_pytorch.evals.regression_metrics import (
 )
 
 if TYPE_CHECKING:
-    from alphagenome_pytorch.data import BundleName, DataBatch
+    from alphagenome_pytorch.data import DataBatch
 
 
 logger = logging.getLogger(__name__)

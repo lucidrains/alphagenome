@@ -1,26 +1,24 @@
 # Ported from alphagenome_research reference implementation
 # (reference/src/alphagenome_research/model/variant_scoring/)
-"""Variant and interval scoring for PyTorch AlphaGenome.
-
-This package exposes lightweight scoring utilities by default and lazily
-imports optional scorers that require extra dependencies.
-"""
+"""Variant and interval scoring for PyTorch AlphaGenome."""
 
 from __future__ import annotations
 
 from importlib import import_module
 
 from .variant_scoring import (
-    VariantScorer,
+    DirectGeneExpressionScorer,
     ScoreVariantOutput,
     ScoreVariantResult,
+    VariantScorer,
     align_alternate,
-    get_resolution,
     create_anndata,
+    get_resolution,
 )
 
 __all__ = [
     'VariantScorer',
+    'DirectGeneExpressionScorer',
     'ScoreVariantOutput',
     'ScoreVariantResult',
     'align_alternate',
@@ -37,34 +35,23 @@ __all__ = [
     'GeneIntervalScorer',
 ]
 
-_LAZY_ATTRS = {
-    'GeneVariantScorer': ('.gene_mask', 'GeneVariantScorer'),
-    'CenterMaskVariantScorer': ('.center_mask', 'CenterMaskVariantScorer'),
-    'create_center_mask': ('.center_mask', 'create_center_mask'),
-    'SpliceJunctionVariantScorer': ('.splice_junction', 'SpliceJunctionVariantScorer'),
-    'ContactMapScorer': ('.contact_map', 'ContactMapScorer'),
-    'PolyadenylationVariantScorer': ('.polyadenylation', 'PolyadenylationVariantScorer'),
-    'PolyadenylationVariantMasks': ('.polyadenylation', 'PolyadenylationVariantMasks'),
-    'IntervalScorer': ('.interval_scoring', 'IntervalScorer'),
-    'GeneIntervalScorer': ('.interval_scoring', 'GeneIntervalScorer'),
+# optional scorers, pulled in on first access
+
+_optional = {
+    'GeneVariantScorer': '.gene_mask',
+    'CenterMaskVariantScorer': '.center_mask',
+    'create_center_mask': '.center_mask',
+    'SpliceJunctionVariantScorer': '.splice_junction',
+    'ContactMapScorer': '.contact_map',
+    'PolyadenylationVariantScorer': '.polyadenylation',
+    'PolyadenylationVariantMasks': '.polyadenylation',
+    'IntervalScorer': '.interval_scoring',
+    'GeneIntervalScorer': '.interval_scoring',
 }
 
 
 def __getattr__(name: str):
-    if name in _LAZY_ATTRS:
-        module_name, attr_name = _LAZY_ATTRS[name]
-        try:
-            module = import_module(module_name, __name__)
-        except Exception as exc:
-            raise ImportError(
-                f"Optional scoring dependency required for '{name}'. "
-                "Install with: pip install 'alphagenome-pytorch[scoring]'"
-            ) from exc
-        value = getattr(module, attr_name)
-        globals()[name] = value
-        return value
-    raise AttributeError(f"module '{__name__}' has no attribute {name!r}")
+    if name not in _optional:
+        raise AttributeError(f"module '{__name__}' has no attribute {name!r}")
 
-
-def __dir__() -> list[str]:
-    return sorted(list(globals().keys()) + list(_LAZY_ATTRS.keys()))
+    return getattr(import_module(_optional[name], __name__), name)

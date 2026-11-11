@@ -7,9 +7,9 @@ from collections import namedtuple, defaultdict
 
 import torch
 import torch.distributed as dist
-from torch import tensor, is_tensor, arange, nn, cat, stack, Tensor
+from torch import tensor, is_tensor, arange, nn, cat, Tensor
 import torch.nn.functional as F
-from torch.nn import Conv1d, Linear, Sequential, Module, ModuleList, LayerNorm, ModuleDict
+from torch.nn import Conv1d, Linear, Sequential, Module, ModuleList, ModuleDict
 
 from torch.amp import autocast
 
@@ -237,7 +237,7 @@ class PoissonLoss(Module):
 
 class JunctionsLoss(Module):
     def __init__(
-        self, 
+        self,
         softclip_scale = 2.,
         softclip_gamma = 10.,
         softclip_threshold = 10.
@@ -250,8 +250,8 @@ class JunctionsLoss(Module):
         self.poisson_loss_col = PoissonLoss(dim = 1, softclip_scale = softclip_scale, softclip_gamma = softclip_gamma, softclip_threshold = softclip_threshold)
 
     def forward(
-        self, 
-        pred: Tensor, 
+        self,
+        pred: Tensor,
         target: Tensor
     ):
         loss = 0.0
@@ -1120,17 +1120,17 @@ class TransformerUnet(Module):
             x = add('b n d, b d', x, pre_attend_embed)
 
         # attention
-        
+
         single, pairwise = self.transformer(x) # 1D 128bp resolution, 2D contact pairs
-        
+
         # ups with skips from down
-        
+
         x = rearrange(single, 'b n d -> b d n')
 
         for up in self.ups:
             skip = skips.pop()
             x = up(x, skip = skip)
-            
+
         out = rearrange(x, 'b d n -> b n d') # 1D 1bp resolution
 
         return TransformerUnetOutput(out, single, pairwise) # the final output, as well as single and pairwise repr from the transformer
@@ -1144,11 +1144,11 @@ class DNAEmbed(Module):
       C -> [0, 1, 0, 0]
       G -> [0, 0, 1, 0]
       T -> [0, 0, 0, 1]
-    
+
     all other characters are encoded as zeros [0, 0, 0, 0].
 
     and here with input:
-    'A': 0, 'C': 1, 'G': 2, 'T': 3, 'N' and other characters: -1 
+    'A': 0, 'C': 1, 'G': 2, 'T': 3, 'N' and other characters: -1
     """
     def __init__(
         self,
@@ -1169,7 +1169,7 @@ class DNAEmbed(Module):
         seq # Int['b n']
     ):
         onehot = F.one_hot(seq.clamp(min=0), num_classes = self.dim_input).float()
-        
+
         # set zeros to other characters
         onehot[seq < 0] = 0.0
         x = rearrange(onehot, 'b n d -> b d n')
@@ -1282,7 +1282,7 @@ class ContactMapHead(Module):
         self.embed = nn.Embedding(num_organisms, input_dim)
         self.gelu = GELU1702()
         self.proj = Linear(input_dim, num_tracks)
-        
+
     def forward(
         self,
         embeds_pair,
@@ -1340,25 +1340,25 @@ class SpliceJunctionHead(Module):
         embeds_1bp, # Float['b n h']
         indices # Int['b p']
     ):
-    
+
         batch, device = embeds_1bp.shape[0], embeds_1bp.device
         n_contexts = self.n_contexts
-    
+
         # index and rescale
-        
+
         batch_indices = rearrange(arange(batch, device = device), 'b -> b 1')
 
         x = embeds_1bp[batch_indices, indices]  # [B, P, H]
 
         x = multiply('b p h, t h -> b p t h', x, self.scale)
         x = add('b p t h, t h -> b p t h', x, self.offset)
-    
+
         # get rotary embeddings [T, H]
-        
+
         rotary_emb = self.rope(n_contexts)
-    
+
         # apply
-        
+
         x = apply_rotary_pos_emb(rotary_emb, x)
 
         return x
@@ -1665,7 +1665,7 @@ class AlphaGenome(Module):
 
             # RNA-seq, CAGE, ATAC, DNAse and PRO-Cap
             ('1bp_tracks', TracksScaledPrediction(self.dim_1bp, num_tracks_1bp), ('embeds_1bp',)),
-            
+
             # TF ChIP-seq and Histone ChIP-seq
             ('128bp_tracks', TracksScaledPrediction(self.dim_128bp, num_tracks_128bp), ('embeds_128bp',)),
 
@@ -1776,7 +1776,7 @@ class AlphaGenome(Module):
             return embeds
 
         return embeds, unet_transformer_out
-    
+
     def forward(
         self,
         seq,
@@ -1792,7 +1792,7 @@ class AlphaGenome(Module):
             organism_index = torch.full((batch,), organism_index, device = seq.device)
 
         # process sequence
-        
+
         embeds, unet_transformer_out = self.get_embeds(seq, organism_index, return_unet_transformer_outputs = True)
 
         # early return embeds, if specified

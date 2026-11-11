@@ -186,7 +186,7 @@ def torch_model():
     from alphagenome_research.model.dna_model import create_from_huggingface
 
     print("\nLoading JAX model and converting weights...")
-    
+
     # Try to get GPU, fallback to CPU
     try:
         device = jax.devices("gpu")[0]
@@ -195,9 +195,9 @@ def torch_model():
             device = jax.devices("tpu")[0]
         except (RuntimeError, ValueError):
             device = jax.devices("cpu")[0]
-    
+
     print(f"JAX using device: {device}")
-    
+
     jax_model = create_from_huggingface("all_folds", device=device)
     flat_params = flatten_nested_dict(jax_model._params)
     flat_state = flatten_nested_dict(jax_model._state)

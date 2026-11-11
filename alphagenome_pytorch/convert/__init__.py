@@ -17,6 +17,8 @@ Usage:
     python -m alphagenome_pytorch.convert.inspect_torch
 """
 
+from __future__ import annotations
+
 from .shape_transforms import (
     transpose_linear_weight,
     transpose_conv1d_weight,
@@ -36,4 +38,3 @@ __all__ = [
     # - inspect_jax: inspect JAX checkpoint
     # - inspect_torch: inspect PyTorch model
 ]
-

@@ -22,7 +22,7 @@ import enum
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple, TypeVar, Generic
+from typing import Any
 
 import numpy as np
 import torch
@@ -45,16 +45,21 @@ class OutputType(enum.Enum):
     """Output types for genomic predictions."""
 
     ATAC = 'atac'
+    SC_ATAC = 'sc_atac'
     CAGE = 'cage'
     DNASE = 'dnase'
     RNA_SEQ = 'rna_seq'
     CHIP_HISTONE = 'chip_histone'
     CHIP_TF = 'chip_tf'
+    METHYLATION = 'methylation'
     SPLICE_SITES = 'splice_sites'
     SPLICE_SITE_USAGE = 'splice_site_usage'
     SPLICE_JUNCTIONS = 'splice_junctions'
     CONTACT_MAPS = 'contact_maps'
     PROCAP = 'procap'
+    GENE_EXPRESSION = 'gene_expression'
+    SINGLE_CELL_GENE_EXPRESSION = 'single_cell_gene_expression'
+    DENOISED_SINGLE_CELL_GENE_EXPRESSION = 'denoised_single_cell_gene_expression'
 
 
 @dataclass(frozen=True)
@@ -147,12 +152,8 @@ class CenterMaskScorer:
 
     requested_output: OutputType
     aggregation_type: AggregationType
-    width: Optional[int] = None
+    width: int | None = None
 
-
-# Type aliases
-ScoreVariantOutput = Dict[str, torch.Tensor | np.ndarray]
-ScoreVariantResult = Dict[str, np.ndarray]
 
 
 def get_resolution(output_type: OutputType) -> int:
@@ -178,13 +179,18 @@ def get_resolution(output_type: OutputType) -> int:
     match output_type:
         case (
             OutputType.ATAC
+            | OutputType.SC_ATAC
             | OutputType.CAGE
             | OutputType.DNASE
             | OutputType.RNA_SEQ
+            | OutputType.METHYLATION
             | OutputType.SPLICE_SITES
             | OutputType.SPLICE_SITE_USAGE
             | OutputType.SPLICE_JUNCTIONS
             | OutputType.PROCAP
+            | OutputType.GENE_EXPRESSION
+            | OutputType.SINGLE_CELL_GENE_EXPRESSION
+            | OutputType.DENOISED_SINGLE_CELL_GENE_EXPRESSION
         ):
             return 1
         case OutputType.CHIP_HISTONE | OutputType.CHIP_TF:
@@ -199,7 +205,7 @@ def create_center_mask(
     interval: Interval,
     variant: Variant,
     *,
-    width: Optional[int],
+    width: int | None,
     resolution: int,
 ) -> np.ndarray:
     """Creates a boolean mask centered on a variant for a given interval.
@@ -362,7 +368,7 @@ class CenterMaskVariantScorer:
         *,
         settings: CenterMaskScorer,
         track_metadata: Any,
-    ) -> Tuple[np.ndarray, None]:
+    ) -> tuple[np.ndarray, None]:
         """Create center mask and metadata for the given interval and variant.
 
         Args:
@@ -391,9 +397,9 @@ class CenterMaskVariantScorer:
         *,
         masks: torch.Tensor | np.ndarray,
         settings: CenterMaskScorer,
-        variant: Optional[Variant] = None,
-        interval: Optional[Interval] = None,
-    ) -> ScoreVariantOutput:
+        variant: Variant | None = None,
+        interval: Interval | None = None,
+    ):
         """Score a variant by aggregating predictions within the center mask.
 
         Args:
@@ -419,7 +425,7 @@ class CenterMaskVariantScorer:
 
     def finalize_variant(
         self,
-        scores: ScoreVariantResult,
+        scores,
         *,
         track_metadata: Any,
         mask_metadata: None,

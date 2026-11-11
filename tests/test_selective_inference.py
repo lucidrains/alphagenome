@@ -1,16 +1,34 @@
 """Tests for selective head execution and ontology filtering."""
 
+from __future__ import annotations
+
 import pytest
 import torch
 
 from alphagenome_pytorch import AlphaGenome
+from alphagenome_pytorch.alphagenome2 import AlphaGenome2
 from alphagenome_pytorch.alphagenome import Embeds, set_update_running_var
 
+MODEL_CLASSES = (AlphaGenome, AlphaGenome2)
 
-@pytest.fixture
-def model():
+TEST_MODEL_KWARGS = dict(
+    dims = (8, 9, 10, 11, 12, 13, 16),
+    transformer_kwargs = dict(
+        depth = 1,
+        heads = 2,
+        dim_head_qk = 32,
+        dim_head_v = 32,
+        dim_pairwise = 4,
+        single_to_pairwise_heads = 2,
+        pool_size = 4,
+    ),
+)
+
+
+@pytest.fixture(params = MODEL_CLASSES, ids = ('alphagenome', 'alphagenome2'))
+def model(request):
     """Create a model with reference heads for testing."""
-    model = AlphaGenome()
+    model = request.param(**TEST_MODEL_KWARGS)
     model.add_reference_heads('human')
     model.eval()
     # Disable BatchRMSNorm running variance updates for deterministic results
@@ -20,12 +38,8 @@ def model():
 
 @pytest.fixture
 def sample_sequence():
-    """Create a sample sequence for testing.
-
-    Minimum sequence length required by the model is ~8192 for the transformer
-    to have enough positions for relative position encoding.
-    """
-    seq_len = 8192
+    """Create a sample sequence for testing."""
+    seq_len = 512
     return torch.randint(0, 4, (1, seq_len))
 
 
@@ -89,7 +103,7 @@ class TestInferenceMethod:
     def test_track_masks_filtering(self, model, sample_sequence):
         """Test that track masks correctly filter output tracks."""
         # Create a mask that keeps only first 10 tracks
-        num_tracks = 768  # rna_seq has 768 tracks
+        num_tracks = model.heads['human']['rna_seq'].resolutions['resolution_1'].to_pred.out_features
         mask = torch.zeros(num_tracks, dtype=torch.bool)
         mask[:10] = True
 
@@ -238,7 +252,7 @@ class TestMemoryEfficiency:
     def test_single_head_uses_less_memory(self, sample_sequence):
         """Test that running a single head uses less memory."""
         device = torch.device('cuda')
-        model = AlphaGenome().to(device)
+        model = AlphaGenome(**TEST_MODEL_KWARGS).to(device)
         model.add_reference_heads('human')
         model.eval()
 

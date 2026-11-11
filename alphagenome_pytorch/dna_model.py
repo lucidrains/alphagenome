@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING
+from collections.abc import Iterable, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
@@ -9,6 +10,7 @@ import torch
 from torch import Tensor
 
 from alphagenome_pytorch.alphagenome import AlphaGenome
+from alphagenome_pytorch.alphagenome2 import AlphaGenome2
 
 if TYPE_CHECKING:
     from alphagenome.data import genome
@@ -34,30 +36,40 @@ _NUM_SPLICE_CLASSES = 4
 
 _OUTPUT_NAME_TO_RESOLUTION = {
     'ATAC': 1,
+    'SC_ATAC': 1,
     'CAGE': 1,
     'DNASE': 1,
     'RNA_SEQ': 1,
     'PROCAP': 1,
     'CHIP_HISTONE': 128,
     'CHIP_TF': 128,
+    'METHYLATION': 1,
     'SPLICE_SITES': 1,
     'SPLICE_SITE_USAGE': 1,
     'SPLICE_JUNCTIONS': 1,
     'CONTACT_MAPS': 2048,
+    'GENE_EXPRESSION': 1,
+    'SINGLE_CELL_GENE_EXPRESSION': 1,
+    'DENOISED_SINGLE_CELL_GENE_EXPRESSION': 1,
 }
 
 _HEAD_TO_OUTPUT_NAME = {
     'atac': 'ATAC',
+    'sc_atac': 'SC_ATAC',
     'cage': 'CAGE',
     'dnase': 'DNASE',
     'rna_seq': 'RNA_SEQ',
     'procap': 'PROCAP',
     'chip_histone': 'CHIP_HISTONE',
     'chip_tf': 'CHIP_TF',
+    'methylation': 'METHYLATION',
     'contact_maps': 'CONTACT_MAPS',
     'splice_sites_classification': 'SPLICE_SITES',
     'splice_sites_usage': 'SPLICE_SITE_USAGE',
     'splice_sites_junction': 'SPLICE_JUNCTIONS',
+    'gene_expression': 'GENE_EXPRESSION',
+    'single_cell_gene_expression': 'SINGLE_CELL_GENE_EXPRESSION',
+    'denoised_single_cell_gene_expression': 'DENOISED_SINGLE_CELL_GENE_EXPRESSION',
 }
 
 
@@ -163,13 +175,11 @@ def _resolve_output_name(output_key) -> str | None:
 
 def _select_head_output(head_output, output_name: str):
     resolution = _OUTPUT_NAME_TO_RESOLUTION.get(output_name)
-    if isinstance(head_output, dict):
-        if resolution == 1 and 'scaled_predictions_1bp' in head_output:
-            return head_output['scaled_predictions_1bp']
-        if resolution == 128 and 'scaled_predictions_128bp' in head_output:
-            return head_output['scaled_predictions_128bp']
-        if resolution == 2048 and 'scaled_predictions_2048bp' in head_output:
-            return head_output['scaled_predictions_2048bp']
+    if isinstance(head_output, dict) and resolution is not None:
+        for prefix in ('scaled_predictions', 'predictions'):
+            key = f'{prefix}_{resolution}bp'
+            if key in head_output:
+                return head_output[key]
     return head_output
 
 
@@ -245,13 +255,17 @@ class DNAModel:
             device=self.device,
         )
 
+    @property
+    def _uses_shared_heads_only(self) -> bool:
+        return isinstance(self.model, AlphaGenome2) and bool(self.model.shared_heads) and not self.model.heads
+
     def _pick_organism_key(
         self,
         predictions: Mapping[str, object],
         organism: str | None,
         return_all_organisms: bool,
     ) -> str | None:
-        if return_all_organisms:
+        if self._uses_shared_heads_only or return_all_organisms:
             return None
         if organism is not None:
             return organism
@@ -289,7 +303,10 @@ class DNAModel:
 
         # Determine which heads to filter
         organism_str = organism or 'human'
-        heads_dict = self.model.heads[organism_str] if organism_str in self.model.heads else {}
+        if organism_str in self.model.heads:
+            heads_dict = self.model.heads[organism_str]
+        else:
+            heads_dict = self.model.shared_heads if isinstance(self.model, AlphaGenome2) else {}
         head_names = set(requested_outputs) if requested_outputs else set(heads_dict.keys())
 
         track_masks = {}
@@ -379,6 +396,7 @@ class DNAModel:
         organism: str | None = None,
         organism_index: int | Tensor | None = None,
         no_grad: bool = True,
+        **head_kwargs,
     ):
         tokens = _as_token_tensor(sequences).to(self.device)
         organism_index_tensor = self._resolve_organism_index(
@@ -386,7 +404,7 @@ class DNAModel:
         )
         context = torch.no_grad if no_grad else torch.enable_grad
         with context():
-            return self.model(tokens, organism_index_tensor, return_embeds=True)
+            return self.model(tokens, organism_index_tensor, return_embeds=True, **head_kwargs)
 
     def predict(
         self,
@@ -446,18 +464,21 @@ class DNAModel:
                 and splice_site_positions is None
                 and isinstance(predictions, dict)
             ):
-                organism_key = self._pick_organism_key(
-                    predictions, organism, return_all_organisms
-                )
-                if organism_key is None:
-                    raise ValueError(
-                        'Multiple organisms present. Provide organism=... or '
-                        'splice_site_positions=... when include_splice_junctions=True.'
+                if self._uses_shared_heads_only:
+                    organism_preds = predictions
+                else:
+                    organism_key = self._pick_organism_key(
+                        predictions, organism, return_all_organisms
                     )
-                organism_preds = predictions.get(organism_key, {})
+                    if organism_key is None:
+                        raise ValueError(
+                            'Multiple organisms present. Provide organism=... or '
+                            'splice_site_positions=... when include_splice_junctions=True.'
+                        )
+                    organism_preds = predictions.get(organism_key, {})
                 splice_logits = organism_preds.get('splice_sites_classification')
                 if splice_logits is None:
-                    return predictions if return_all_organisms else organism_preds
+                    return predictions if (return_all_organisms or self._uses_shared_heads_only) else organism_preds
                 splice_site_positions = self._infer_splice_site_positions(splice_logits)
                 # Add splice_site_positions to head_kwargs for the second inference pass
                 head_kwargs = {**head_kwargs, 'splice_site_positions': splice_site_positions}
@@ -497,6 +518,7 @@ class DNAModel:
         no_grad: bool = True,
         requested_outputs: Iterable[str] | None = None,
         ontology_terms: Iterable[str] | None = None,
+        **head_kwargs,
     ):
         seq_ref_tensor = _as_token_tensor(seq_ref).to(self.device)
         seq_alt_tensor = _as_token_tensor(seq_alt).to(self.device)
@@ -524,6 +546,7 @@ class DNAModel:
                 organism=organism,
                 requested_heads=requested_heads,
                 track_masks=track_masks,
+                **head_kwargs,
             )
 
     def ism(
@@ -540,6 +563,7 @@ class DNAModel:
         return_predictions: bool = False,
         requested_outputs: Iterable[str] | None = None,
         ontology_terms: Iterable[str] | None = None,
+        **head_kwargs,
     ) -> dict[str, np.ndarray]:
         tokens = _as_token_tensor(sequence).to(self.device)
         if tokens.shape[0] != 1:
@@ -579,8 +603,9 @@ class DNAModel:
                 organism_index_tensor,
                 requested_heads=requested_heads,
                 track_masks=track_masks,
+                **head_kwargs,
             )
-            if isinstance(ref_preds, dict):
+            if isinstance(ref_preds, dict) and not self._uses_shared_heads_only:
                 organism_key = self._pick_organism_key(
                     ref_preds, organism, return_all_organisms=False
                 )
@@ -639,8 +664,9 @@ class DNAModel:
                     organism_index_tensor.repeat(len(batch_mutations)),
                     requested_heads=requested_heads,
                     track_masks=track_masks,
+                    **head_kwargs,
                 )
-                if isinstance(preds, dict):
+                if isinstance(preds, dict) and not self._uses_shared_heads_only:
                     organism_key = self._pick_organism_key(
                         preds, organism, return_all_organisms=False
                     )

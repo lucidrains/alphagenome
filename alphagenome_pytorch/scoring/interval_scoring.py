@@ -50,7 +50,7 @@ IntervalMetadataT = TypeVar('IntervalMetadataT')
 IntervalSettingsT = TypeVar('IntervalSettingsT')
 
 # Type aliases for score outputs
-ScoreIntervalOutput = Mapping[str, Union[Tensor, np.ndarray]]
+ScoreIntervalOutput = Mapping[str, Tensor | np.ndarray]
 ScoreIntervalResult = Mapping[str, np.ndarray]
 
 
@@ -148,7 +148,7 @@ class IntervalScorer(
 
 class GeneIntervalScorer(
     IntervalScorer[
-        Union[np.ndarray, Tensor],  # IntervalMaskT: boolean mask [S, G]
+        np.ndarray | Tensor,  # IntervalMaskT: boolean mask [S, G]
         pd.DataFrame,  # IntervalMetadataT: gene metadata
         interval_scorers.GeneMaskScorer,  # IntervalSettingsT
     ]
@@ -235,7 +235,7 @@ class GeneIntervalScorer(
         self,
         predictions: Mapping[dna_output.OutputType, Tensor],
         *,
-        masks: Union[np.ndarray, Tensor],
+        masks: np.ndarray | Tensor,
         settings: interval_scorers.GeneMaskScorer,
         interval: genome.Interval | None = None,
     ) -> ScoreIntervalOutput:

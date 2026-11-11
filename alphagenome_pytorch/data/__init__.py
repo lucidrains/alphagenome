@@ -5,6 +5,8 @@ This module provides data loading utilities for training and inference,
 including TFRecord dataset loading and batch collation.
 """
 
+from __future__ import annotations
+
 from alphagenome_pytorch.data.batch import (
     DataBatch,
     collate_batch,

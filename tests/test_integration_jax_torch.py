@@ -37,17 +37,11 @@ _load_dotenv()
 # Import verification utilities
 from tests.verification_utils import (
     THRESHOLDS,
-    VerificationLevel,
-    LEVEL_CONFIGS,
     get_test_cases,
     compute_statistics,
-    check_level,
-    check_thresholds,
     check_systematic_bias,
     check_no_nan_inf,
     get_expected_shapes,
-    check_shapes,
-    generate_random_sequence,
 )
 
 
@@ -217,7 +211,6 @@ def converted_state_dict(jax_model):
     from alphagenome_pytorch.convert.convert_checkpoint import (
         convert_checkpoint,
         flatten_nested_dict,
-        jax_to_torch_tensor,
     )
 
     flat_params = flatten_nested_dict(jax_model._params)
@@ -406,7 +399,6 @@ class TestForwardPass:
         """
         if not strict_stats_enabled():
             pytest.skip("Strict JAX/Torch parity disabled. Set ALPHAGENOME_STRICT_STATS=1 to enable.")
-        import jax
         import jax.numpy as jnp
         import numpy as np
 

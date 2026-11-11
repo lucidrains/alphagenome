@@ -121,8 +121,6 @@ def convert_checkpoint(
         PyTorch state_dict ready for model.load_state_dict()
     """
     from .mapping_spec import (
-        ParamMapping,
-        TransformType,
         apply_transform,
         build_trunk_mapping,
         build_state_mapping,

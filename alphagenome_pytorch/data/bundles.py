@@ -5,8 +5,9 @@ Each bundle represents a specific type of genomic data (e.g., ATAC-seq, CAGE)
 with its own resolution and data/mask structure.
 """
 
+from __future__ import annotations
+
 import enum
-from typing import Dict
 
 import torch
 
@@ -27,7 +28,7 @@ class BundleName(enum.Enum):
     SPLICE_SITES_JUNCTION = 'splice_junctions'
     SPLICE_SITES_POSITIONS = 'splice_site_positions'
 
-    def get_dtypes(self) -> Dict[str, torch.dtype]:
+    def get_dtypes(self) -> dict[str, torch.dtype]:
         """Returns the keys and dtypes for the given bundle."""
         match self:
             case BundleName.ATAC:

@@ -1,8 +1,9 @@
 """Tests for newly added modules: data, scoring, and evals."""
 
+from __future__ import annotations
+
 import pytest
 import torch
-import numpy as np
 
 
 class TestDataModule:
@@ -86,7 +87,6 @@ class TestEvalsModule:
     def test_regression_state(self):
         """Test RegressionState dataclass."""
         from alphagenome_pytorch.evals import (
-            RegressionState,
             initialize_regression_metrics,
         )
 
@@ -97,7 +97,6 @@ class TestEvalsModule:
     def test_update_regression_metrics(self):
         """Test metric update function."""
         from alphagenome_pytorch.evals import (
-            initialize_regression_metrics,
             update_regression_metrics,
             finalize_regression_metrics,
         )

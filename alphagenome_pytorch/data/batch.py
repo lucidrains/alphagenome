@@ -5,8 +5,10 @@ This module defines the DataBatch dataclass that holds batched training data
 with torch tensors, matching the schema from the reference implementation.
 """
 
-from dataclasses import dataclass, field, fields
-from typing import Any, Dict, List, Optional, Tuple
+from __future__ import annotations
+
+from dataclasses import dataclass, fields
+from typing import Any
 
 import torch
 
@@ -29,46 +31,46 @@ class DataBatch:
     """
 
     # Core inputs
-    dna_sequence: Optional[torch.Tensor] = None  # [B, S_DNA, 4] float32
-    organism_index: Optional[torch.Tensor] = None  # [B] int32
+    dna_sequence: torch.Tensor | None = None  # [B, S_DNA, 4] float32
+    organism_index: torch.Tensor | None = None  # [B] int32
 
     # ATAC-seq data (1bp resolution)
-    atac: Optional[torch.Tensor] = None  # [B, S, C_ATAC] bfloat16
-    atac_mask: Optional[torch.Tensor] = None  # [B, S, C_ATAC] bool
+    atac: torch.Tensor | None = None  # [B, S, C_ATAC] bfloat16
+    atac_mask: torch.Tensor | None = None  # [B, S, C_ATAC] bool
 
     # DNase-seq data (1bp resolution)
-    dnase: Optional[torch.Tensor] = None  # [B, S, C_DNASE] bfloat16
-    dnase_mask: Optional[torch.Tensor] = None  # [B, S, C_DNASE] bool
+    dnase: torch.Tensor | None = None  # [B, S, C_DNASE] bfloat16
+    dnase_mask: torch.Tensor | None = None  # [B, S, C_DNASE] bool
 
     # PRO-cap data (1bp resolution)
-    procap: Optional[torch.Tensor] = None  # [B, S, C_PROCAP] bfloat16
-    procap_mask: Optional[torch.Tensor] = None  # [B, S, C_PROCAP] bool
+    procap: torch.Tensor | None = None  # [B, S, C_PROCAP] bfloat16
+    procap_mask: torch.Tensor | None = None  # [B, S, C_PROCAP] bool
 
     # CAGE data (1bp resolution)
-    cage: Optional[torch.Tensor] = None  # [B, S, C_CAGE] bfloat16
-    cage_mask: Optional[torch.Tensor] = None  # [B, S, C_CAGE] bool
+    cage: torch.Tensor | None = None  # [B, S, C_CAGE] bfloat16
+    cage_mask: torch.Tensor | None = None  # [B, S, C_CAGE] bool
 
     # RNA-seq data (1bp resolution)
-    rna_seq: Optional[torch.Tensor] = None  # [B, S, C_RNA_SEQ] bfloat16
-    rna_seq_mask: Optional[torch.Tensor] = None  # [B, S, C_RNA_SEQ] bool
-    rna_seq_strand: Optional[torch.Tensor] = None  # [B, 1, C_RNA_SEQ] int32
+    rna_seq: torch.Tensor | None = None  # [B, S, C_RNA_SEQ] bfloat16
+    rna_seq_mask: torch.Tensor | None = None  # [B, S, C_RNA_SEQ] bool
+    rna_seq_strand: torch.Tensor | None = None  # [B, 1, C_RNA_SEQ] int32
 
     # ChIP-seq TF data (128bp resolution)
-    chip_tf: Optional[torch.Tensor] = None  # [B, S//128, C_CHIP_TF] float32
-    chip_tf_mask: Optional[torch.Tensor] = None  # [B, S//128, C_CHIP_TF] bool
+    chip_tf: torch.Tensor | None = None  # [B, S//128, C_CHIP_TF] float32
+    chip_tf_mask: torch.Tensor | None = None  # [B, S//128, C_CHIP_TF] bool
 
     # ChIP-seq histone data (128bp resolution)
-    chip_histone: Optional[torch.Tensor] = None  # [B, S//128, C_CHIP_HISTONE] float32
-    chip_histone_mask: Optional[torch.Tensor] = None  # [B, S//128, C_CHIP_HISTONE] bool
+    chip_histone: torch.Tensor | None = None  # [B, S//128, C_CHIP_HISTONE] float32
+    chip_histone_mask: torch.Tensor | None = None  # [B, S//128, C_CHIP_HISTONE] bool
 
     # Contact maps (2048bp resolution)
-    contact_maps: Optional[torch.Tensor] = None  # [B, S//2048, S//2048, C_CONTACT_MAPS] float32
+    contact_maps: torch.Tensor | None = None  # [B, S//2048, S//2048, C_CONTACT_MAPS] float32
 
     # Splice site data
-    splice_sites: Optional[torch.Tensor] = None  # [B, S, C_SPLICE_SITES] bool
-    splice_site_usage: Optional[torch.Tensor] = None  # [B, S, C_SPLICE_SITE_USAGE] float16
-    splice_junctions: Optional[torch.Tensor] = None  # [B, P, P, C_SPLICE_JUNCTIONS] float32
-    splice_site_positions: Optional[torch.Tensor] = None  # [B, 4, P] int32
+    splice_sites: torch.Tensor | None = None  # [B, S, C_SPLICE_SITES] bool
+    splice_site_usage: torch.Tensor | None = None  # [B, S, C_SPLICE_SITE_USAGE] float16
+    splice_junctions: torch.Tensor | None = None  # [B, P, P, C_SPLICE_JUNCTIONS] float32
+    splice_site_positions: torch.Tensor | None = None  # [B, 4, P] int32
 
     def get_organism_index(self) -> torch.Tensor:
         """Returns the organism index data.
@@ -82,7 +84,7 @@ class DataBatch:
 
     def get_genome_tracks(
         self, bundle: BundleName
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Returns the genome tracks data and mask for the given bundle.
 
         Args:
@@ -152,7 +154,7 @@ class DataBatch:
         return DataBatch(**kwargs)
 
 
-def collate_batch(samples: List[Dict[str, Any]]) -> DataBatch:
+def collate_batch(samples: list[dict[str, Any]]) -> DataBatch:
     """Collate function for PyTorch DataLoader.
 
     Takes a list of sample dictionaries and stacks them into a single DataBatch.
@@ -173,7 +175,7 @@ def collate_batch(samples: List[Dict[str, Any]]) -> DataBatch:
         all_keys.update(sample.keys())
 
     # Stack tensors for each key
-    collated: Dict[str, Any] = {}
+    collated: dict[str, Any] = {}
     for key in all_keys:
         values = [sample.get(key) for sample in samples]
 
@@ -198,7 +200,7 @@ def collate_batch(samples: List[Dict[str, Any]]) -> DataBatch:
     return DataBatch(**filtered_collated)
 
 
-def dict_to_batch(data: Dict[str, Any], organism_index: int = 0) -> DataBatch:
+def dict_to_batch(data: dict[str, Any], organism_index: int = 0) -> DataBatch:
     """Convert a dictionary of numpy arrays or tensors to a DataBatch.
 
     This is useful for converting raw TFRecord data to a DataBatch.
@@ -210,7 +212,7 @@ def dict_to_batch(data: Dict[str, Any], organism_index: int = 0) -> DataBatch:
     Returns:
         A DataBatch instance.
     """
-    batch_data: Dict[str, Any] = {}
+    batch_data: dict[str, Any] = {}
     valid_field_names = {f.name for f in fields(DataBatch)}
 
     for key, value in data.items():

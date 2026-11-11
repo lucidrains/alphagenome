@@ -12,20 +12,22 @@ import abc
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import TYPE_CHECKING, Any, Generic, TypeVar, Union
+from typing import TYPE_CHECKING, Generic, TypeVar
 
 import numpy as np
 import torch
 from torch import Tensor
 
-# Type variables for generic variant scorer
 VariantMaskT = TypeVar('VariantMaskT')
 VariantMetadataT = TypeVar('VariantMetadataT')
 VariantSettingsT = TypeVar('VariantSettingsT')
 
-# Type aliases for score outputs
-ScoreVariantOutput = Mapping[str, Union[Tensor, np.ndarray]]
+ScoreVariantOutput = Mapping[str, Tensor | np.ndarray]
 ScoreVariantResult = Mapping[str, np.ndarray]
+
+
+def exists(v):
+    return v is not None
 
 
 class OutputType(Enum):
@@ -45,13 +47,17 @@ class OutputType(Enum):
     SPLICE_JUNCTIONS = auto()
     CONTACT_MAPS = auto()
     PROCAP = auto()
+    SC_ATAC = auto()
+    METHYLATION = auto()
+    GENE_EXPRESSION = auto()
+    SINGLE_CELL_GENE_EXPRESSION = auto()
+    DENOISED_SINGLE_CELL_GENE_EXPRESSION = auto()
 
 
 if TYPE_CHECKING:
     import anndata
     import pandas as pd
 
-# Type alias for output metadata (mapping from OutputType to track metadata)
 OutputMetadata = Mapping[OutputType, 'pd.DataFrame']
 
 
@@ -188,11 +194,10 @@ def create_anndata(
     """
     try:
         import anndata
-        import pandas as pd
     except ImportError as exc:
         raise ImportError(
-            'anndata and pandas are required to create AnnData outputs. '
-            "Install them with: pip install 'alphagenome-pytorch[scoring]'"
+            'anndata is required to create AnnData outputs. '
+            "Install it with: pip install 'alphagenome-pytorch[scoring]'"
         ) from exc
 
     var = var.copy()
@@ -220,45 +225,40 @@ def get_resolution(output_type: OutputType) -> int:
         ValueError: If the output type is unknown.
     """
     match output_type:
-        case OutputType.ATAC:
-            return 1
-        case OutputType.CAGE:
-            return 1
-        case OutputType.DNASE:
-            return 1
-        case OutputType.RNA_SEQ:
+        case (
+            OutputType.ATAC
+            | OutputType.SC_ATAC
+            | OutputType.CAGE
+            | OutputType.DNASE
+            | OutputType.RNA_SEQ
+            | OutputType.METHYLATION
+            | OutputType.SPLICE_SITES
+            | OutputType.SPLICE_SITE_USAGE
+            | OutputType.SPLICE_JUNCTIONS
+            | OutputType.PROCAP
+            | OutputType.GENE_EXPRESSION
+            | OutputType.SINGLE_CELL_GENE_EXPRESSION
+            | OutputType.DENOISED_SINGLE_CELL_GENE_EXPRESSION
+        ):
             return 1
         case OutputType.CHIP_HISTONE:
             return 128
         case OutputType.CHIP_TF:
             return 128
-        case OutputType.SPLICE_SITES:
-            return 1
-        case OutputType.SPLICE_SITE_USAGE:
-            return 1
-        case OutputType.SPLICE_JUNCTIONS:
-            return 1
         case OutputType.CONTACT_MAPS:
             return 2048
-        case OutputType.PROCAP:
-            return 1
         case _:
             raise ValueError(f'Unknown output type: {output_type}.')
 
 
 class VariantScorer(
     Generic[VariantMaskT, VariantMetadataT, VariantSettingsT],
-    metaclass=abc.ABCMeta,
+    abc.ABC,
 ):
     """Abstract class for variant scorers.
 
     A variant scorer computes effect scores for genomic variants by comparing
     predictions from reference and alternate alleles.
-
-    Type Parameters:
-        VariantMaskT: Type of masks used for scoring.
-        VariantMetadataT: Type of metadata returned alongside masks.
-        VariantSettingsT: Type of settings/configuration for the scorer.
     """
 
     @abc.abstractmethod
@@ -418,3 +418,224 @@ def align_alternate(
         alt = alt[:original_length]
 
     return alt
+
+
+HEAD_TO_OUTPUT_SPEC = dict(
+    atac = ('ATAC', 1),
+    sc_atac = ('SC_ATAC', 1),
+    cage = ('CAGE', 1),
+    dnase = ('DNASE', 1),
+    rna_seq = ('RNA_SEQ', 1),
+    procap = ('PROCAP', 1),
+    chip_histone = ('CHIP_HISTONE', 128),
+    chip_tf = ('CHIP_TF', 128),
+    contact_maps = ('CONTACT_MAPS', 2048),
+    methylation = ('METHYLATION', 1),
+    splice_sites_classification = ('SPLICE_SITES', 1),
+    splice_sites_usage = ('SPLICE_SITE_USAGE', 1),
+    splice_sites_junction = ('SPLICE_JUNCTIONS', 1),
+    gene_expression = ('GENE_EXPRESSION', 1),
+    single_cell_gene_expression = ('SINGLE_CELL_GENE_EXPRESSION', 1),
+    denoised_single_cell_gene_expression = ('DENOISED_SINGLE_CELL_GENE_EXPRESSION', 1),
+)
+
+
+def _select_primary_prediction(head_out, resolution: int):
+    if isinstance(head_out, dict):
+        for prefix in ('scaled_predictions', 'predictions'):
+            key = f'{prefix}_{resolution}bp'
+            if key in head_out:
+                return head_out[key]
+    return head_out
+
+
+def _resolve_mapping_key(mapping, key):
+    if key in mapping:
+        return key
+    name = key.name if isinstance(key, Enum) else (key if isinstance(key, str) else None)
+    if not exists(name):
+        return None
+    for candidate in (name, name.lower(), name.upper()):
+        if candidate in mapping:
+            return candidate
+    for candidate in mapping:
+        if isinstance(candidate, Enum) and candidate.name == name.upper():
+            return candidate
+    return None
+
+
+def _mask_scored_prediction(pred, mask):
+    if not exists(pred) or not exists(mask):
+        return pred
+    if isinstance(pred, dict) and 'predictions' in pred:
+        inner = pred['predictions']
+        if not exists(inner):
+            return pred
+        tiled = torch.as_tensor(mask, device = inner.device, dtype = torch.bool).repeat(2) if torch.is_tensor(inner) else np.tile(mask, 2)
+        return dict(pred, predictions = inner[..., tiled])
+    if torch.is_tensor(pred):
+        return pred[..., torch.as_tensor(mask, device = pred.device, dtype = torch.bool)]
+    return pred[..., mask]
+
+
+def _rc_scored_prediction(pred, reindex):
+    from torch_einops_utils.shape import is_shape
+
+    if not exists(pred) or not exists(reindex) or (isinstance(pred, dict) and 'predictions' in pred):
+        return pred
+    if torch.is_tensor(pred):
+        flip_dims = (1,) if is_shape(pred, 'b n c') else ((1, 2) if is_shape(pred, 'b h w c') else ())
+        pred_rc = pred.flip(flip_dims) if flip_dims else pred
+        return pred_rc.index_select(-1, torch.as_tensor(reindex, device = pred_rc.device, dtype = torch.long))
+    pred_rc = pred[:, ::-1, :] if pred.ndim == 3 else (pred[:, ::-1, ::-1, :] if pred.ndim == 4 else pred)
+    return pred_rc[..., reindex]
+
+
+def score_variant_with_model(
+    model,
+    seq_ref,
+    seq_alt,
+    organism_index,
+    scorer,
+    settings,
+    variant,
+    interval,
+    track_metadata = None,
+    *,
+    organism = None,
+    **infer_kwargs,
+):
+    from torch_einops_utils import tree_map_tensor
+    from torch_einops_utils.shape import is_shape, size
+
+    ref_out = model.inference(seq_ref, organism_index, **infer_kwargs)
+    alt_out = model.inference(seq_alt, organism_index, **infer_kwargs)
+
+    if model.heads and isinstance(ref_out, dict) and ref_out:
+        if not exists(organism):
+            if len(ref_out) == 1:
+                organism = next(iter(ref_out))
+            elif 'shared' in ref_out:
+                organism = 'shared'
+            else:
+                raise ValueError('Multiple organisms present in model output; pass `organism=...`.')
+        if organism not in ref_out:
+            raise KeyError(f'Organism {organism!r} not found in model output {list(ref_out)}.')
+        ref_out, alt_out = ref_out[organism], alt_out[organism]
+
+    requested_output = settings if isinstance(settings, (Enum, str)) else settings.requested_output
+    output_enum = type(requested_output) if isinstance(requested_output, Enum) else None
+
+    if exists(output_enum) and isinstance(ref_out, dict):
+        def map_outputs(outputs):
+            mapped = {
+                output_enum[spec[0]]: _select_primary_prediction(val, spec[1])
+                for head_name, val in outputs.items()
+                if exists(spec := HEAD_TO_OUTPUT_SPEC.get(head_name)) and spec[0] in output_enum.__members__
+            }
+            return mapped or outputs
+
+        ref_out, alt_out = map_outputs(ref_out), map_outputs(alt_out)
+        if requested_output not in ref_out:
+            raise KeyError(f'Requested output {requested_output!r} not found in model predictions.')
+
+    metadata = track_metadata
+
+    try:
+        padding = metadata.padding
+    except AttributeError:
+        padding = None
+
+    if exists(requested_output) and exists(padding) and isinstance(ref_out, dict):
+        padding_key = _resolve_mapping_key(padding, requested_output)
+        if exists(padding_key):
+            mask = ~np.asarray(padding[padding_key])
+            out_key = _resolve_mapping_key(ref_out, requested_output) or requested_output
+            if out_key in ref_out:
+                ref_out[out_key] = _mask_scored_prediction(ref_out[out_key], mask)
+            if out_key in alt_out:
+                alt_out[out_key] = _mask_scored_prediction(alt_out[out_key], mask)
+            if isinstance(track_metadata, Mapping) and exists(meta := track_metadata.get(padding_key)):
+                track_metadata = {out_key: meta[mask]}
+
+    try:
+        reindexing = metadata.strand_reindexing
+    except AttributeError:
+        reindexing = None
+
+    if exists(requested_output) and exists(interval) and interval.negative_strand and exists(reindexing) and isinstance(ref_out, dict):
+        reindex_key = _resolve_mapping_key(reindexing, requested_output)
+        if exists(reindex_key):
+            reindex = reindexing[reindex_key]
+            out_key = _resolve_mapping_key(ref_out, requested_output) or requested_output
+            if out_key in ref_out:
+                ref_out[out_key] = _rc_scored_prediction(ref_out[out_key], reindex)
+            if out_key in alt_out:
+                alt_out[out_key] = _rc_scored_prediction(alt_out[out_key], reindex)
+
+    is_single = isinstance(seq_ref, str) or (torch.is_tensor(seq_ref) and (is_shape(seq_ref, 'n') or size(seq_ref, '[b] ...') == 1))
+    if is_single and isinstance(ref_out, dict):
+        squeeze_fn = lambda t: t.squeeze(0) if is_shape(t, '1 _ ...') else t
+        ref_out, alt_out = tree_map_tensor(squeeze_fn, ref_out), tree_map_tensor(squeeze_fn, alt_out)
+
+    masks, mask_metadata = scorer.get_masks_and_metadata(interval, variant, settings = settings, track_metadata = track_metadata)
+    scores = scorer.score_variant(ref_out, alt_out, masks = masks, settings = settings, variant = variant, interval = interval)
+    scores_np = {k: (v.cpu().numpy() if torch.is_tensor(v) else v) for k, v in scores.items()}
+
+    return scorer.finalize_variant(scores_np, track_metadata = track_metadata, mask_metadata = mask_metadata, settings = settings)
+
+
+class DirectGeneExpressionScorer(VariantScorer[None, 'pd.DataFrame | None', OutputType]):
+    """Scores Alt/Ref gene expression as log(y_alt + eps) - log(y_ref + eps)."""
+
+    def __init__(self, pseudocount = 1e-3, gene_metadata = None):
+        self.pseudocount = pseudocount
+        self.gene_metadata = gene_metadata
+
+    def get_masks_and_metadata(
+        self,
+        interval: Interval,
+        variant: Variant,
+        *,
+        settings: OutputType,
+        track_metadata: OutputMetadata,
+    ) -> tuple[None, 'pd.DataFrame | None']:
+        return None, self.gene_metadata
+
+    def score_variant(
+        self,
+        ref: Mapping[OutputType, 'Tensor'],
+        alt: Mapping[OutputType, 'Tensor'],
+        *,
+        masks = None,
+        settings: OutputType,
+        variant: Variant | None = None,
+        interval: Interval | None = None,
+    ) -> ScoreVariantOutput:
+        ref_expr, alt_expr = ref[settings], alt[settings]
+
+        if isinstance(ref_expr, dict):
+            ref_expr = ref_expr['predictions_1bp']
+
+        if isinstance(alt_expr, dict):
+            alt_expr = alt_expr['predictions_1bp']
+
+        return dict(score = torch.log(alt_expr + self.pseudocount) - torch.log(ref_expr + self.pseudocount))
+
+    def finalize_variant(
+        self,
+        scores: ScoreVariantResult,
+        *,
+        track_metadata: OutputMetadata,
+        mask_metadata: 'pd.DataFrame | None',
+        settings: OutputType,
+    ) -> anndata.AnnData:
+        import pandas as pd
+
+        score = np.asarray(scores['score'])
+        var = track_metadata.get(settings) if isinstance(track_metadata, Mapping) else track_metadata
+
+        if not isinstance(var, pd.DataFrame):
+            var = pd.DataFrame(dict(name = [f'channel_{i}' for i in range(score.shape[-1])]))
+
+        return create_anndata(score, obs = mask_metadata, var = var)

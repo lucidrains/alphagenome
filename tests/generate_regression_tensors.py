@@ -25,7 +25,8 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import Any, Literal
+from collections.abc import Callable
 
 import numpy as np
 

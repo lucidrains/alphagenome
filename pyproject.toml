@@ -30,7 +30,7 @@ dependencies = [
     "einx>=0.3.0",
     "einops>=0.8.0",
     "PoPE-pytorch>=0.0.9",
-    "torch-einops-utils",
+    "torch-einops-utils>=0.2.6",
     "torch>=2.4",
     "scikit-learn>=1.8.0",
     "nbconvert>=7.17.0",
@@ -50,6 +50,7 @@ Repository = "https://github.com/lucidrains/alphagenome"
 test = [
     "pytest",
     "scipy",
+    "anndata>=0.10",
 ]
 
 example = [

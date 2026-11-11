@@ -25,7 +25,7 @@ def parse_args():
     parser.add_argument("--config_file", type=str)
     args = parser.parse_args()
     return args
-    
+
 def load_config(config_file):
     with open(config_file, 'r') as f:
         return yaml.safe_load(f)
@@ -101,10 +101,10 @@ def main():
     torch.autograd.set_detect_anomaly(True)
 
     # unpack config
-    
+
     args = parse_args()
     config = load_config(args.config_file)
-    
+
     seed = config.get('seed', 1234)
     seq_len = config.get('seq_len', 8192)
     num_samples = config.get('num_samples', 1000)
@@ -113,7 +113,7 @@ def main():
     epochs = config.get('epochs', 10)
     lr = config.get('lr', 1e-4)
     checkpoint_freq = config.get('checkpoint_freq', 2)
-    
+
     checkpoint_dir = config.get('checkpoint_dir', './checkpoints')
     output_dir = config.get('output_dir', './outputs')
 
@@ -127,13 +127,13 @@ def main():
     heads_cfg = config.get('heads', default_cfg.head_specs)
 
     # init
-    
+
     set_seed(seed)
     os.makedirs(checkpoint_dir, exist_ok=True)
     os.makedirs(output_dir, exist_ok=True)
 
     # architecture
-    
+
     model = AlphaGenome(dims, basepairs, dna_embed_width, num_organisms, transformer_kwargs)
     for organism, head_cfg in heads_cfg.items():
         model.add_heads(organism=organism, **head_cfg)
@@ -144,7 +144,7 @@ def main():
         model = nn.DataParallel(model)
 
     # dataset
-    
+
     targets_dataset = DummyTargetsDataset(heads_cfg, seq_len, dim_contacts=model.dim_contacts, global_seed=seed)
     train_dataset = DummyGenomeDataset(seq_len, num_samples, targets_dataset, global_seed=seed)
 
@@ -154,7 +154,7 @@ def main():
     index_to_organism = {i: org for i, org in enumerate(organism_list)}
 
     # optimization
-    
+
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
     # prepare accelerator for distributed
@@ -186,7 +186,7 @@ def main():
     }
 
     # training loop
-    
+
     for epoch in range(epochs):
         avg_train_loss = train_one_epoch(
             model = model,
@@ -199,7 +199,7 @@ def main():
             device = device
         )
         print(f"[Epoch {epoch+1}] Train Loss: {avg_train_loss:.4f}")
-    
+
         if (epoch + 1) % checkpoint_freq == 0 and accelerator.is_main_process:
             save_path = os.path.join(checkpoint_dir, f'epoch_{epoch+1}.pt')
             save_model(model, optimizer, epoch + 1, save_path)
@@ -208,7 +208,7 @@ def main():
         accelerator.wait_for_everyone()
 
     # save final model
-    
+
     save_path = os.path.join(output_dir, f'epoch_{epoch+1}.pt')
     save_model(model, optimizer, epochs, save_path)
     print(f"Saved final model: {save_path}")

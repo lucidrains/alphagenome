@@ -197,12 +197,20 @@ That's it. Vibe coding with some attention network is totally welcomed, if it wo
 
 ```bibtex
 @misc{gopalakrishnan2025decouplingwhatwherepolar,
-    title   = {Decoupling the "What" and "Where" With Polar Coordinate Positional Embeddings}, 
+    title   = {Decoupling the "What" and "Where" With Polar Coordinate Positional Embeddings},
     author  = {Anand Gopalakrishnan and Robert Csordás and Jürgen Schmidhuber and Michael C. Mozer},
     year    = {2025},
     eprint  = {2509.10534},
     archivePrefix = {arXiv},
     primaryClass = {cs.LG},
-    url     = {https://arxiv.org/abs/2509.10534}, 
+    url     = {https://arxiv.org/abs/2509.10534},
+}
+```
+
+```bibtex
+@misc{gayoso2026alphagenome2,
+    title   = {AlphaGenome 2 predicts regulatory activity and variant effects across cell states},
+    author  = {Gayoso, Adam and Mottram, Anne and Karollus, Alexander and Novati, Guido and Drot{\'a}r, Pavol and Reid, John and Meng-Papaxanthos, Laetitia and Kosiorek, Adam and Arvaniti, Eirini and Dutordoir, Vincent and De, Soham and Ward, Tom and Wong, Lai Hong and Perino, Matteo and Taylor, Kyle and Cheng, Jun and Latysheva, Natasha and Pan, Joshua and Hariharan, Dhavanthi and Bycroft, Clare and Nicolaisen, Lauren and Hassabis, Demis and Kohli, Pushmeet and Avsec, {\v Z}iga},
+    year    = {2026}
 }
 ```

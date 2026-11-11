@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import torch
 
 from alphagenome_pytorch.convert.shape_transforms import (
@@ -68,4 +70,3 @@ def test_bake_standardized_conv1d_weight_matches_reference_math():
     assert baked_w.shape == expected_w.shape == (out_ch, in_ch, width)
     assert torch.allclose(baked_w, expected_w, rtol=0, atol=0)
     assert torch.allclose(baked_b, bias, rtol=0, atol=0)
-

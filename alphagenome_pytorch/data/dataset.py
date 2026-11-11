@@ -5,11 +5,11 @@ This module provides a PyTorch Dataset that loads AlphaGenome data from
 TFRecord files using TensorFlow for reading and converting to PyTorch tensors.
 """
 
-import functools
-import os
+from __future__ import annotations
+
 import re
 from collections.abc import Sequence
-from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
+from collections.abc import Iterator
 
 import numpy as np
 import torch
@@ -52,12 +52,12 @@ def _check_tensorflow():
 
 def get_tfrecords_df(
     *,
-    organism: Optional[str] = None,
-    bundle: Optional[BundleName] = None,
-    fold_split: Optional[str] = None,
-    subset: Optional[str] = None,
-    chromosome: Optional[str] = None,
-    path: Optional[str] = None,
+    organism: str | None = None,
+    bundle: BundleName | None = None,
+    fold_split: str | None = None,
+    subset: str | None = None,
+    chromosome: str | None = None,
+    path: str | None = None,
 ) -> 'pd.DataFrame':
     """Return a dataframe with metadata about the TFRecord files.
 
@@ -179,7 +179,7 @@ def _tf_to_torch_dtype(tf_dtype: 'tf.DType') -> torch.dtype:
     return dtype_map.get(tf_dtype, torch.float32)
 
 
-def _numpy_to_torch(arr: np.ndarray, target_dtype: Optional[torch.dtype] = None) -> torch.Tensor:
+def _numpy_to_torch(arr: np.ndarray, target_dtype: torch.dtype | None = None) -> torch.Tensor:
     """Convert numpy array to torch tensor with appropriate dtype handling."""
     # Handle bfloat16 - numpy doesn't support it natively
     if arr.dtype == np.float32 and target_dtype == torch.bfloat16:
@@ -218,10 +218,10 @@ class AlphaGenomeTFRecordDataset(Dataset):
         organism: str = 'HOMO_SAPIENS',
         fold_split: str = 'FOLD_0',
         subset: str = 'TRAIN',
-        bundles: Optional[Sequence[BundleName]] = None,
-        path: Optional[str] = None,
+        bundles: Sequence[BundleName] | None = None,
+        path: str | None = None,
         cache_in_memory: bool = False,
-        organism_index: Optional[int] = None,
+        organism_index: int | None = None,
     ):
         """Initialize the dataset.
 
@@ -256,9 +256,9 @@ class AlphaGenomeTFRecordDataset(Dataset):
 
         # Load metadata and create dataset
         self._load_metadata()
-        self._cache: Dict[int, Dict[str, torch.Tensor]] = {}
-        self._tf_dataset: Optional['tf.data.Dataset'] = None
-        self._data_list: Optional[List[Dict[str, np.ndarray]]] = None
+        self._cache: dict[int, dict[str, torch.Tensor]] = {}
+        self._tf_dataset: 'tf.data.Dataset' | None = None
+        self._data_list: list[dict[str, np.ndarray]] | None = None
 
     def _load_metadata(self):
         """Load metadata about available TFRecord files."""
@@ -290,7 +290,7 @@ class AlphaGenomeTFRecordDataset(Dataset):
             return
 
         # Get number of samples from first bundle's files
-        self._bundle_paths: Dict[BundleName, List[str]] = {}
+        self._bundle_paths: dict[BundleName, list[str]] = {}
         for bundle in self.bundles:
             bundle_name = bundle.value.upper()
             paths = self._metadata_df[
@@ -361,7 +361,7 @@ class AlphaGenomeTFRecordDataset(Dataset):
             return len(self._data_list)
         return self._num_samples
 
-    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+    def __getitem__(self, idx: int) -> dict[str, torch.Tensor]:
         """Get a sample by index.
 
         Args:
@@ -393,7 +393,7 @@ class AlphaGenomeTFRecordDataset(Dataset):
             self._cache[idx] = sample
         return sample
 
-    def _load_sample(self, idx: int) -> Dict[str, torch.Tensor]:
+    def _load_sample(self, idx: int) -> dict[str, torch.Tensor]:
         """Load a single sample from disk."""
         # This is inefficient for random access - consider using cache_in_memory
         self._load_all_data()
@@ -401,9 +401,9 @@ class AlphaGenomeTFRecordDataset(Dataset):
             return self._convert_sample(self._data_list[idx])
         raise IndexError(f"Index {idx} out of range")
 
-    def _convert_sample(self, np_sample: Dict[str, np.ndarray]) -> Dict[str, torch.Tensor]:
+    def _convert_sample(self, np_sample: dict[str, np.ndarray]) -> dict[str, torch.Tensor]:
         """Convert a numpy sample to torch tensors."""
-        result: Dict[str, torch.Tensor] = {}
+        result: dict[str, torch.Tensor] = {}
 
         for key, value in np_sample.items():
             if key.startswith('interval/'):
@@ -448,9 +448,9 @@ class AlphaGenomeTFRecordIterableDataset(IterableDataset):
         organism: str = 'HOMO_SAPIENS',
         fold_split: str = 'FOLD_0',
         subset: str = 'TRAIN',
-        bundles: Optional[Sequence[BundleName]] = None,
-        path: Optional[str] = None,
-        organism_index: Optional[int] = None,
+        bundles: Sequence[BundleName] | None = None,
+        path: str | None = None,
+        organism_index: int | None = None,
         shuffle: bool = False,
         shuffle_buffer_size: int = 1000,
     ):
@@ -491,7 +491,7 @@ class AlphaGenomeTFRecordIterableDataset(IterableDataset):
 
     def _load_metadata(self):
         """Load metadata about available TFRecord files."""
-        self._bundle_paths: Dict[BundleName, List[str]] = {}
+        self._bundle_paths: dict[BundleName, list[str]] = {}
 
         for bundle in self.bundles:
             df = get_tfrecords_df(
@@ -504,7 +504,7 @@ class AlphaGenomeTFRecordIterableDataset(IterableDataset):
             if not df.empty:
                 self._bundle_paths[bundle] = df.sort_values('shard')['path'].tolist()
 
-    def __iter__(self) -> Iterator[Dict[str, torch.Tensor]]:
+    def __iter__(self) -> Iterator[dict[str, torch.Tensor]]:
         """Iterate through the dataset."""
         if not self._bundle_paths:
             return
@@ -539,9 +539,9 @@ class AlphaGenomeTFRecordIterableDataset(IterableDataset):
         for element in zipped_ds:
             yield self._convert_element(element)
 
-    def _convert_element(self, element) -> Dict[str, torch.Tensor]:
+    def _convert_element(self, element) -> dict[str, torch.Tensor]:
         """Convert a TF dataset element to torch tensors."""
-        result: Dict[str, torch.Tensor] = {}
+        result: dict[str, torch.Tensor] = {}
 
         # Handle zipped elements
         if isinstance(element, tuple):
@@ -555,7 +555,7 @@ class AlphaGenomeTFRecordIterableDataset(IterableDataset):
 
         return result
 
-    def _process_dict(self, element) -> Dict[str, torch.Tensor]:
+    def _process_dict(self, element) -> dict[str, torch.Tensor]:
         """Process a single element dictionary."""
         result = {}
         for key, value in element.items():

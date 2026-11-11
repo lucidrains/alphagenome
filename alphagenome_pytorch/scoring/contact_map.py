@@ -20,6 +20,8 @@
 This implements the Orca scoring strategy from Zhou 2022.
 """
 
+from __future__ import annotations
+
 import math
 from collections.abc import Mapping
 from typing import Any
@@ -213,7 +215,7 @@ class ContactMapScorer:
         # Use center mask to select the variant row.
         # Right now, assumes there is a single value.
         # Output shape: [C]
-        output = abs_diff[masks_tensor.squeeze().argmax(), :]
+        output = abs_diff[masks_tensor.int().squeeze(-1).argmax(), :]
 
         return {'score': output.cpu().numpy()}
 

@@ -6,8 +6,10 @@ test case generators, and statistical comparison functions for validating
 the equivalence of JAX and PyTorch model outputs.
 """
 
+from __future__ import annotations
+
 from enum import IntEnum
-from typing import Any, Dict, List, Tuple, Union
+from typing import Any
 
 import numpy as np
 
@@ -156,7 +158,7 @@ def generate_half_and_half_sequence(seq_len: int = 16384) -> np.ndarray:
     return np.concatenate([first_half, second_half])
 
 
-def get_test_cases(seq_len: int = 16384) -> List[Tuple[str, np.ndarray]]:
+def get_test_cases(seq_len: int = 16384) -> list[tuple[str, np.ndarray]]:
     """
     Generate all 13 test cases for verification.
 
@@ -207,7 +209,7 @@ def compute_statistics(
     jax_output: Any,
     torch_output: Any,
     sigma_threshold: float = 5.0,
-) -> Dict[str, float]:
+) -> dict[str, float]:
     """
     Compute comparison statistics between JAX and PyTorch outputs.
 
@@ -289,7 +291,7 @@ def compute_statistics(
 
 
 def check_level(
-    stats: Dict[str, float],
+    stats: dict[str, float],
     level: VerificationLevel,
     jax_output: Any = None,
     torch_output: Any = None,
@@ -330,7 +332,7 @@ def check_level(
     return fraction_within >= fraction_required
 
 
-def check_thresholds(stats: Dict[str, float], output_name: str) -> bool:
+def check_thresholds(stats: dict[str, float], output_name: str) -> bool:
     """
     Check if statistics pass the per-output thresholds.
 
@@ -362,7 +364,7 @@ def check_systematic_bias(
     jax_output: Any,
     torch_output: Any,
     alpha: float = 0.05,
-) -> Tuple[bool, float]:
+) -> tuple[bool, float]:
     """
     Check for systematic bias between JAX and PyTorch outputs using paired t-test.
 
@@ -420,7 +422,7 @@ def check_no_nan_inf(tensor: Any) -> bool:
 # Expected Output Shapes Helper
 # =============================================================================
 
-def get_expected_shapes(seq_len: int = 16384, batch_size: int = 1) -> Dict[str, Tuple[int, ...]]:
+def get_expected_shapes(seq_len: int = 16384, batch_size: int = 1) -> dict[str, tuple[int, ...]]:
     """
     Get expected output shapes for the model outputs.
 
@@ -439,10 +441,10 @@ def get_expected_shapes(seq_len: int = 16384, batch_size: int = 1) -> Dict[str, 
 
 
 def check_shapes(
-    outputs: Dict[str, Any],
+    outputs: dict[str, Any],
     seq_len: int = 16384,
     batch_size: int = 1,
-) -> Dict[str, bool]:
+) -> dict[str, bool]:
     """
     Check if output shapes match expected shapes.
 
