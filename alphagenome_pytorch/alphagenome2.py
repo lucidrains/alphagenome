@@ -3,10 +3,11 @@ from __future__ import annotations
 from inspect import signature
 from collections import defaultdict
 from functools import partial
+from typing import Callable
 
 import torch
 import torch.nn.functional as F
-from torch import is_tensor, nn, tensor
+from torch import Tensor, is_tensor, nn, tensor
 
 import einx
 from einops import rearrange, reduce, repeat
@@ -22,6 +23,7 @@ from torch_einops_utils import (
     masked_mean,
     pack_with_inverse,
     pad_right_at_dim,
+    pad_right_ndim_to,
     slice_left_at_dim,
     tree_map_tensor,
 )
@@ -1520,7 +1522,8 @@ class AlphaGenome2(Module):
         condition_index = None,
         cell_embed = None,
         attn_mask = None,
-        return_unet_transformer_out = False
+        return_unet_transformer_out = False,
+        flow_cond: Tensor | None = None
     ):
         seq = parse_dna_seq(seq, device = self.device)
         batch = size(seq, '[b] ...')
@@ -1532,6 +1535,7 @@ class AlphaGenome2(Module):
             condition_index = torch.full((batch,), condition_index, device = seq.device, dtype = torch.long)
 
         cond = self.conditioning_embedder(organism_index, condition_index = condition_index, cell_embed = cell_embed)
+        cond = cond + flow_cond.type_as(cond) if exists(flow_cond) else cond
         unet_transformer_out = self.transformer_unet(seq, cond = cond, attn_mask = attn_mask)
         unet_out, single, pairwise = unet_transformer_out
 
@@ -1699,3 +1703,84 @@ class AlphaGenome2(Module):
             track_metadata,
             **kwargs
         )
+
+class FlowAlphaGenome2(AlphaGenome2):
+    # rectified flow (Liu et al., 2022) + XM best-of-k (Gladstone et al., 2026)
+    def __init__(
+        self,
+        *args,
+        channels: int = 12,
+        target_scaler: TargetScaler | None = None,
+        head: Module | None = None,
+        loss_fn: Module | None = None,
+        best_of_k: int = 2,
+        noise_std: float = 0.5,
+        noise_mean: float = 0.,
+        time_fourier_scale: float = 16.,
+        time_to_loss_weight_fn: Callable[[Tensor], Tensor] | None = None,
+        **kwargs
+    ):
+        super().__init__(*args, **kwargs)
+        self.noise_std, self.noise_mean, self.time_to_loss_weight_fn = noise_std, noise_mean, time_to_loss_weight_fn
+        self.target_scaler = target_scaler
+        self.head = default(head, TracksScaledPrediction(self.dim_1bp, channels))
+        self.loss_fn = default(loss_fn, MultinomialLoss())
+        self.best_of_k = best_of_k
+        self.to_flow = Linear(channels, self.dim_1bp)
+        self.register_buffer('time_freqs', torch.randn(self.dim_cond // 2) * time_fourier_scale)
+
+    def _predict(self, seq, x, t, organism_index = 0, **kwargs):
+        emb = einx.multiply('..., d -> ... d', t, self.time_freqs)
+        flow_cond = torch.cat((emb.sin(), emb.cos()), dim = -1)
+
+        embeds = self.get_embeds(seq, organism_index, flow_cond = flow_cond, **kwargs)
+        embeds = embeds._replace(embeds_1bp = embeds.embeds_1bp + self.to_flow(x))
+
+        return self.head(embeds.embeds_1bp)
+
+    def _scale(self, x):
+        return self.target_scaler(x) if exists(self.target_scaler) else x
+
+    def _inverse(self, x):
+        return self.target_scaler.inverse(x) if exists(self.target_scaler) else x
+
+    def _forward_loss(self, seq, target, t, organism_index = 0, **kwargs):
+        noise = torch.randn_like(target)
+        noise = noise * self.noise_std + self.noise_mean
+
+        noised = noise.lerp(target, pad_right_ndim_to(t, target.ndim))
+        pred_target = self._predict(seq, noised, t, organism_index = organism_index, **kwargs)
+
+        return self.loss_fn(pred_target, target)
+
+    def forward(self, seq, organism_index = 0, target = None, **kwargs):
+        if not exists(target):
+            return super().forward(seq, organism_index, **kwargs)
+
+        target = self._scale(target)
+        t = torch.rand(target.shape[0], device = target.device)
+
+        losses = torch.stack([
+            self._forward_loss(seq, target, t, organism_index = organism_index, **kwargs)
+            for _ in range(self.best_of_k)
+        ])
+        loss = losses.min()
+
+        loss = loss * self.time_to_loss_weight_fn(t) if exists(self.time_to_loss_weight_fn) else loss
+
+        return loss
+
+    @torch.no_grad()
+    def sample(self, seq, steps = 10, organism_index = 0, **kwargs):
+        seq = parse_dna_seq(seq, device = self.device)
+
+        shape = (*seq.shape[:2], self.to_flow.in_features)
+        noise = torch.randn(shape, device = self.device)
+        x = noise * self.noise_std + self.noise_mean
+
+        for t in torch.linspace(0., 1., steps + 1, device = x.device)[:-1]:
+            pred_target = self._predict(seq, x, t, organism_index = organism_index, **kwargs)
+            pred_flow = (pred_target - x) / (1. - t)
+            x = x + pred_flow / steps
+
+        return self._inverse(x)
