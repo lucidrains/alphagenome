@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from inspect import signature
+from itertools import zip_longest
 from collections import defaultdict
 from functools import partial
 from typing import Callable
@@ -41,6 +42,7 @@ from alphagenome_pytorch.alphagenome import Embeds, TransformerUnetOutput
 # c - channels / tracks
 # s - strands
 # g - genes
+# l - depth / stage history
 
 # constants
 
@@ -798,6 +800,107 @@ def FeedForward(dim, *, expansion_factor = 2.):
         Linear(dim_inner, dim)
     )
 
+# multi-head attention residuals
+# https://arxiv.org/abs/2603.15031 (Attention Residuals, Kimi Team)
+# https://arxiv.org/abs/2607.27230 (Multi-Head Attention Residuals, Luo et al.)
+# https://arxiv.org/abs/2604.03297 (XAttnRes, Liu et al.)
+
+def resize_1d(x, length, pooling = 'max'):
+    src_len = size(x, 'b [n] d')
+
+    if src_len == length:
+        return x
+
+    assert pooling in ('max', 'avg', 'mean'), f'unsupported pooling mode {pooling}'
+
+    if src_len > length:
+        if divisible_by(src_len, length):
+            return reduce(x, 'b (n pool) d -> b n d', 'max' if pooling == 'max' else 'mean', pool = src_len // length)
+
+        pool_fn = F.adaptive_max_pool1d if pooling == 'max' else F.adaptive_avg_pool1d
+        return rearrange(pool_fn(rearrange(x, 'b n d -> b d n'), length), 'b d n -> b n d')
+
+    if divisible_by(length, src_len):
+        return repeat(x, 'b n d -> b (n upsample) d', upsample = length // src_len)
+
+    return rearrange(F.interpolate(rearrange(x, 'b n d -> b d n'), size = length, mode = 'linear', align_corners = False), 'b d n -> b n d')
+
+def LoRA(dim, dim_out, dim_lora = 8):
+    down = LinearNoBias(dim, dim_lora)
+    up = LinearNoBias(dim_lora, dim_out)
+    nn.init.zeros_(up.weight)
+    return Sequential(RMSNorm(dim), down, up)
+
+class MultiHeadAttentionResidual(Module):
+    def __init__(
+        self,
+        dim,
+        *,
+        dim_ins: tuple[int, ...] | None = None,
+        heads = 8,
+        pooling = 'max',
+        dim_lora: int | None = 8,
+        channel_first = False
+    ):
+        super().__init__()
+        assert divisible_by(dim, heads), f'dim {dim} must be divisible by heads {heads}'
+        assert pooling in ('max', 'avg', 'mean'), f'unsupported pooling mode {pooling}'
+
+        dim_head = dim // heads
+        self.heads = heads
+        self.scale = dim_head ** -0.5
+        self.pooling = pooling
+        self.channel_first = channel_first
+
+        has_lora = exists(dim_lora) and dim_lora > 0
+
+        self.projs = ModuleList([LinearNoBias(d, dim) if d != dim else nn.Identity() for d in dim_ins]) if exists(dim_ins) else None
+        self.loras = ModuleList([LoRA(d, dim, dim_lora) for d in dim_ins]) if (exists(dim_ins) and has_lora) else None
+        self.lora = LoRA(dim, dim, dim_lora) if (not exists(dim_ins) and has_lora) else None
+
+        self.norm = RMSNorm(dim)
+        self.pseudo_query = nn.Parameter(torch.zeros(heads, dim_head))
+
+    def forward(self, x, history = None, return_attn = False):
+        if not exists(history) or (exists(self.projs) and len(history) == 0):
+            return (x, None) if return_attn else x
+
+        if self.channel_first:
+            x = rearrange(x, 'b d n -> b n d')
+            history = tree_map_tensor(lambda t: rearrange(t, 'b d n -> b n d'), history)
+
+        length = size(x, 'b [n] d')
+
+        if exists(self.projs):
+            assert len(history) == len(self.projs), f'history must have {len(self.projs)} entries, got {len(history)}'
+            values, keys = [], []
+
+            for h, proj, maybe_lora in zip_longest(history, self.projs, default(self.loras, ())):
+                h = resize_1d(h, length, pooling = self.pooling)
+                value = proj(h)
+                key = value + maybe_lora(h) if exists(maybe_lora) else value
+
+                values.append(value)
+                keys.append(self.norm(key))
+
+            values = torch.stack([*values, x])
+            keys = torch.stack([*keys, self.norm(x)])
+        else:
+            values = torch.stack([*(resize_1d(h, length, pooling = self.pooling) for h in history), x])
+            keys = self.norm(values + self.lora(values) if exists(self.lora) else values)
+
+        values, keys = map(lambda t: rearrange(t, 'l b n (h d) -> b l h n d', h = self.heads), (values, keys))
+
+        logits = einx.dot('b l h n d, h d -> b l h n', keys, self.pseudo_query) * self.scale
+        attn = logits.softmax(dim = 1)
+
+        out = einx.dot('b l h n, b l h n d -> b n (h d)', attn, values)
+
+        if self.channel_first:
+            out = rearrange(out, 'b n d -> b d n')
+
+        return (out, attn) if return_attn else out
+
 # transformer
 
 class NormWrapper(Module):
@@ -837,9 +940,12 @@ class TransformerTower(Module):
         single_to_pairwise_heads = 32,
         single_to_pairwise_dim_head = None,
         pool_size = 16,
-        cond_dim = None
+        cond_dim = None,
+        use_attn_res = False,
+        attn_res_kwargs: dict | None = None
     ):
         super().__init__()
+        attn_res_kwargs = default(attn_res_kwargs, dict())
         self.pairwise_every = pairwise_every_num_single_blocks
         self.polar_pos_emb = polar_pos_emb
         self.rotary_emb, self.polar_emb = None, None
@@ -851,6 +957,7 @@ class TransformerTower(Module):
             self.rotary_emb = RotaryEmbedding(dim_head_qk, max_positions = max_positions)
 
         layers = []
+        attn_res_layers = []
 
         for layer_index in range(depth):
             attn = NormWrapper(
@@ -885,23 +992,45 @@ class TransformerTower(Module):
 
             layers.append(ModuleList([attn, ff, single_to_pairwise, pairwise_attn, pairwise_ff]))
 
+            if use_attn_res:
+                attn_res_layers.append(ModuleList([
+                    MultiHeadAttentionResidual(dim, **attn_res_kwargs),
+                    MultiHeadAttentionResidual(dim, **attn_res_kwargs)
+                ]))
+
         self.layers = ModuleList(layers)
+        self.attn_res_layers = ModuleList(attn_res_layers) if use_attn_res else None
+        self.final_attn_res = MultiHeadAttentionResidual(dim, **attn_res_kwargs) if use_attn_res else None
         self.dim_pairwise = dim_pairwise
 
-    def forward(self, single, cond = None, attn_mask = None):
+    def forward(self, single, cond = None, attn_mask = None, history: list[Tensor] | None = None):
         seq_len = size(single, 'b [n] d')
         pairwise = None
 
         pos_emb = dict(polar_emb = self.polar_emb(seq_len)) if self.polar_pos_emb else dict(rotary_emb = self.rotary_emb(seq_len))
 
-        for attn, ff, maybe_single_to_pair, maybe_pairwise_attn, maybe_pairwise_ff in self.layers:
+        history = list(default(history, ()))
+
+        for (attn, ff, maybe_single_to_pair, maybe_pairwise_attn, maybe_pairwise_ff), (maybe_attn_res, maybe_ff_res) in zip_longest(self.layers, default(self.attn_res_layers, ()), fillvalue = (None, None)):
+            if exists(maybe_attn_res):
+                single, prev = maybe_attn_res(single, history), single
+                history.append(prev)
+
             if exists(maybe_single_to_pair):
                 pairwise = maybe_single_to_pair(single) + default(pairwise, 0.)
                 pairwise = maybe_pairwise_attn(pairwise) + pairwise
                 pairwise = maybe_pairwise_ff(pairwise) + pairwise
 
             single = attn(single, pairwise = pairwise, cond = cond, attn_mask = attn_mask, **pos_emb) + single
+
+            if exists(maybe_ff_res):
+                single, prev = maybe_ff_res(single, history), single
+                history.append(prev)
+
             single = ff(single, cond = cond) + single
+
+        if exists(self.final_attn_res):
+            single = self.final_attn_res(single, history)
 
         return single, pairwise
 
@@ -914,12 +1043,21 @@ class TransformerUnet(Module):
         basepairs = 4,
         dna_embed_width = 15,
         cond_dim = None,
-        transformer_kwargs = None
+        transformer_kwargs = None,
+        use_attn_res = False,
+        attn_res_kwargs: dict | None = None
     ):
         super().__init__()
-        transformer_kwargs = default(transformer_kwargs, dict())
+        transformer_kwargs = dict(default(transformer_kwargs, dict()))
+        attn_res_kwargs = dict(default(attn_res_kwargs, dict()))
+        replace_skips = attn_res_kwargs.pop('replace_skips', False)
+
         assert is_odd(dna_embed_width)
         assert len(dims) >= 2
+        assert not (replace_skips and not use_attn_res), 'replace_skips requires use_attn_res = True'
+
+        self.replace_skips = replace_skips
+        self.attn_res_pooling = attn_res_kwargs.get('pooling', 'max')
 
         first_dim, *_, last_dim = dims
         self.dna_embed = DNAEmbed(first_dim, dim_input = basepairs, width = dna_embed_width, cond_dim = cond_dim)
@@ -932,31 +1070,86 @@ class TransformerUnet(Module):
         dims_rev = list(reversed(dims))
         up_in_dims = [last_dim, *dims_rev[:-1]]
         ups = [
-            UpresBlock(dim_in, channels_to_remove = dim_in - dim_out, cond_dim = cond_dim)
+            UpresBlock(dim_in, channels_to_remove = dim_in - dim_out, has_skip = not replace_skips, cond_dim = cond_dim)
             for dim_in, dim_out in zip(up_in_dims, dims_rev)
         ]
 
         self.downs = ModuleList(downs)
         self.ups = ModuleList(ups)
+
+        self.down_attn_res = None
+        self.up_attn_res = None
+        self.unpooled_to_tower = None
+
+        if use_attn_res:
+            unet_attn_res_kwargs = dict(channel_first = True, **attn_res_kwargs)
+
+            down_attn_res, up_attn_res = [], []
+            history_dims = [first_dim]
+
+            for dim_out in dims[1:]:
+                down_attn_res.append(MultiHeadAttentionResidual(dim_out, dim_ins = tuple(history_dims), **unet_attn_res_kwargs))
+                history_dims.append(dim_out)
+
+            self.unpooled_to_tower = ModuleList([
+                LinearNoBias(d, last_dim) if d != last_dim else nn.Identity()
+                for d in history_dims
+            ])
+
+            history_dims.append(last_dim)
+
+            for dim_out in dims_rev:
+                up_attn_res.append(MultiHeadAttentionResidual(dim_out, dim_ins = tuple(history_dims), **unet_attn_res_kwargs))
+                history_dims.append(dim_out)
+
+            self.down_attn_res = ModuleList(down_attn_res)
+            self.up_attn_res = ModuleList(up_attn_res)
+
+            transformer_kwargs = dict(
+                use_attn_res = True,
+                attn_res_kwargs = attn_res_kwargs,
+                **transformer_kwargs
+            )
+
         self.transformer = TransformerTower(dim = last_dim, cond_dim = cond_dim, **transformer_kwargs)
 
     def forward(self, seq, cond = None, attn_mask = None):
         x = self.dna_embed(seq, cond)
         skips = [x]
+        history = [x]
 
-        for down in self.downs:
+        for down, maybe_attn_res in zip_longest(self.downs, default(self.down_attn_res, ())):
             x = down(x, cond)
+
+            if exists(maybe_attn_res):
+                x = maybe_attn_res(x, history)
+                history.append(x)
+
             skips.append(x)
 
         x = reduce(x, 'b d (n pool) -> b d n', 'max', pool = 2)
         x = rearrange(x, 'b d n -> b n d')
 
-        single, pairwise = self.transformer(x, cond = cond, attn_mask = attn_mask)
+        tower_history = None
+        if exists(self.unpooled_to_tower):
+            seq_len = size(x, 'b [n] d')
+            tower_history = [
+                proj(resize_1d(rearrange(h, 'b d n -> b n d'), seq_len, pooling = self.attn_res_pooling))
+                for h, proj in zip(history, self.unpooled_to_tower)
+            ]
+
+        single, pairwise = self.transformer(x, cond = cond, attn_mask = attn_mask, history = tower_history)
 
         x = rearrange(single, 'b n d -> b d n')
+        history.append(x)
 
-        for up in self.ups:
-            x = up(x, skip = skips.pop(), cond = cond)
+        for up, maybe_attn_res in zip_longest(self.ups, default(self.up_attn_res, ())):
+            skip = None if self.replace_skips else skips.pop()
+            x = up(x, skip = skip, cond = cond)
+
+            if exists(maybe_attn_res):
+                x = maybe_attn_res(x, history)
+                history.append(x)
 
         return TransformerUnetOutput(rearrange(x, 'b d n -> b n d'), single, pairwise)
 
@@ -1309,7 +1502,9 @@ class AlphaGenome2(Module):
         output_embed_film = False,
         add_reference_heads = False,
         include_denoised_sc_gene_expr = False,
-        transformer_kwargs = None
+        transformer_kwargs = None,
+        use_attn_res = False,
+        attn_res_kwargs: dict | None = None
     ):
         super().__init__()
         transformer_kwargs = default(transformer_kwargs, dict())
@@ -1319,7 +1514,9 @@ class AlphaGenome2(Module):
             basepairs = basepairs,
             dna_embed_width = dna_embed_width,
             cond_dim = dim_cond,
-            transformer_kwargs = transformer_kwargs
+            transformer_kwargs = transformer_kwargs,
+            use_attn_res = use_attn_res,
+            attn_res_kwargs = attn_res_kwargs
         )
 
         first_dim, *_, last_dim = dims

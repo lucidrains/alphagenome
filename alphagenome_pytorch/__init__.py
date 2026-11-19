@@ -29,6 +29,7 @@ from alphagenome_pytorch.alphagenome2 import (
     FiLM,
     GeneExpressionHead,
     MethylationHead,
+    MultiHeadAttentionResidual,
     SingleCellAutoencoder,
 )
 from alphagenome_pytorch.config import AlphaGenomeConfig
@@ -76,6 +77,7 @@ __all__ = [
     'SingleCellAutoencoder',
     'FiLM',
     'MethylationHead',
+    'MultiHeadAttentionResidual',
     'GeneExpressionHead',
     'BinomialLoss',
     'DirectGeneExpressionScorer',

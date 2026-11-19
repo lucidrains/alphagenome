@@ -23,6 +23,7 @@ from alphagenome_pytorch.alphagenome2 import (
     BinomialLoss,
     DownresBlock as DownresBlockV2,
     JunctionsLoss as JunctionsLossV2,
+    MultiHeadAttentionResidual,
     MultinomialCrossEntropy as MultinomialCrossEntropyV2,
     MultinomialLoss as MultinomialLossV2,
     PoissonLoss as PoissonLossV2,
@@ -32,6 +33,7 @@ from alphagenome_pytorch.alphagenome2 import (
     TracksScaledPrediction as TracksScaledPredictionV2,
     TransformerTower as TransformerTowerV2,
     UpresBlock as UpresBlockV2,
+    exists,
 )
 
 TEST_MODEL_KWARGS = dict(
@@ -331,3 +333,148 @@ def test_alphagenome2_dna_model_and_variant_scoring():
         requested_outputs = ['splice_sites_junction'], condition_index = 2, splice_site_positions = sj_pos,
     )
     assert sj.shape == (1, 3) and np.isfinite(sj.X).all()
+
+# multi-head attention residuals tests
+
+@param('dim_lora', (8, None))
+@param('heads', (1, 2, 4))
+@param('channel_first', (False, True))
+def test_multihead_attn_residual(dim_lora, heads, channel_first):
+    attn_res = MultiHeadAttentionResidual(
+        dim = 32,
+        dim_ins = (16, 32, 64),
+        heads = heads,
+        dim_lora = dim_lora,
+        channel_first = channel_first
+    )
+
+    if channel_first:
+        x = torch.randn(2, 32, 32, requires_grad = True)
+        history = [
+            torch.randn(2, 16, 128, requires_grad = True),
+            torch.randn(2, 32, 32, requires_grad = True),
+            torch.randn(2, 64, 8, requires_grad = True),
+        ]
+    else:
+        x = torch.randn(2, 32, 32, requires_grad = True)
+        history = [
+            torch.randn(2, 128, 16, requires_grad = True),
+            torch.randn(2, 32, 32, requires_grad = True),
+            torch.randn(2, 8, 64, requires_grad = True),
+        ]
+
+    out, attn = attn_res(x, history, return_attn = True)
+    assert out.shape == x.shape and is_shape(attn, '2 4 h 32', h = heads)
+
+    out.sum().backward()
+    assert exists(x.grad) and x.grad.abs().sum() > 0
+    assert all(exists(h.grad) and h.grad.abs().sum() > 0 for h in history)
+    assert exists(attn_res.pseudo_query.grad) and attn_res.pseudo_query.grad.abs().sum() > 0
+
+def test_multihead_attn_residual_uniform_init_and_empty_history():
+    with pytest.raises(AssertionError):
+        MultiHeadAttentionResidual(dim = 32, heads = 3)
+
+    attn_res = MultiHeadAttentionResidual(dim = 32, dim_ins = (32, 32), heads = 4)
+
+    x = torch.randn(2, 16, 32)
+    h0, h1 = torch.randn(2, 16, 32), torch.randn(2, 16, 32)
+
+    assert torch.allclose(attn_res(x, [h0, h1]), (x + h0 + h1) / 3, atol = 1e-5)
+
+    empty_res = MultiHeadAttentionResidual(dim = 32)
+    assert torch.equal(empty_res(x), x)
+    assert torch.allclose(empty_res(x, []), x)
+
+    arb_res = MultiHeadAttentionResidual(dim = 16, dim_ins = (8, 24), heads = 4, pooling = 'avg')
+    out_arb = arb_res(torch.randn(2, 30, 16), [torch.randn(2, 50, 8), torch.randn(2, 12, 24)])
+    assert is_shape(out_arb, '2 30 16')
+
+def test_transformer_tower_v2_attn_res():
+    tower = TransformerTowerV2(
+        dim = 16,
+        depth = 2,
+        heads = 2,
+        dim_head_qk = 16,
+        dim_head_v = 16,
+        dim_pairwise = 4,
+        single_to_pairwise_heads = 2,
+        pool_size = 4,
+        use_attn_res = True,
+        attn_res_kwargs = dict(heads = 4)
+    )
+
+    single = torch.randn(2, 32, 16, requires_grad = True)
+    single_out, pair_out = tower(single)
+    assert is_shape(single_out, '2 32 16') and is_shape(pair_out, '2 8 8 4')
+
+    (single_out.sum() + pair_out.sum()).backward()
+    assert all(exists(p.grad) for p in tower.parameters())
+
+@param('use_attn_res', (False, True))
+@param('attn_res_heads', (1, 2, 4, 8))
+def test_alphagenome2_attn_res(use_attn_res, attn_res_heads):
+    model = AlphaGenome2(
+        dims = (8, 16, 24, 32),
+        dim_cond = 16,
+        transformer_kwargs = TEST_MODEL_KWARGS['transformer_kwargs'],
+        use_attn_res = use_attn_res,
+        attn_res_kwargs = dict(heads = attn_res_heads)
+    )
+
+    soft_dna = torch.randn(2, 64, 4, requires_grad = True)
+    embeds_1bp, embeds_128bp, embeds_pair = model(soft_dna.softmax(dim = -1), condition_index = 1)
+
+    assert is_shape(embeds_1bp, '2 64 8')
+    assert is_shape(embeds_128bp, '2 4 32')
+    assert is_shape(embeds_pair, '2 1 1 4')
+
+    (embeds_1bp.sum() + embeds_128bp.sum() + embeds_pair.sum()).backward()
+    assert exists(soft_dna.grad) and soft_dna.grad.abs().sum() > 0
+
+    unet = model.transformer_unet
+
+    if use_attn_res:
+        assert unet.down_attn_res[0].pseudo_query.grad.abs().sum() > 0
+        assert unet.up_attn_res[-1].pseudo_query.grad.abs().sum() > 0
+        assert unet.transformer.final_attn_res.pseudo_query.grad.abs().sum() > 0
+        assert unet.unpooled_to_tower[0].weight.grad.abs().sum() > 0
+    else:
+        assert not exists(unet.down_attn_res) and not exists(unet.up_attn_res)
+        assert not exists(unet.transformer.final_attn_res)
+
+    assert all(exists(p.grad) for p in unet.parameters() if p.requires_grad)
+
+@param('replace_skips', (False, True))
+@param('pooling', ('max', 'avg'))
+def test_alphagenome2_attn_res_options(replace_skips, pooling):
+    model = AlphaGenome2(
+        dims = (8, 16, 24, 32),
+        dim_cond = 16,
+        transformer_kwargs = TEST_MODEL_KWARGS['transformer_kwargs'],
+        use_attn_res = True,
+        attn_res_kwargs = dict(heads = 4, pooling = pooling, replace_skips = replace_skips)
+    )
+
+    dna = torch.randint(0, 4, (2, 64))
+    embeds_1bp, embeds_128bp, embeds_pair = model(dna, condition_index = 1)
+    assert is_shape(embeds_1bp, '2 64 8') and is_shape(embeds_128bp, '2 4 32') and is_shape(embeds_pair, '2 1 1 4')
+
+def test_alphagenome2_single_flag_attn_res():
+    from alphagenome_pytorch import AlphaGenome2
+
+    model = AlphaGenome2(
+        dims = (8, 16, 24, 32),
+        transformer_kwargs = TEST_MODEL_KWARGS['transformer_kwargs'],
+        use_attn_res = True
+    )
+
+    dna = torch.randint(0, 4, (2, 64))
+    embeds_1bp, embeds_128bp, embeds_pair = model(dna, organism_index = 0)
+
+    assert is_shape(embeds_1bp, '2 64 8')
+    assert is_shape(embeds_128bp, '2 4 32')
+    assert is_shape(embeds_pair, '2 1 1 4')
+
+
+
